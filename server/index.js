@@ -10,6 +10,7 @@ const PORT = process.env.PORT || 3000;
 
 // --- Security Helper: UUID Validation ---
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const COMPRESSED_FILE_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}_compressed\.(mp4|gif|mp3)$/i;
 function isValidUUID(str) {
   return typeof str === 'string' && UUID_REGEX.test(str);
 }
@@ -37,6 +38,7 @@ function cleanupTmp(maxAgeMs = MAX_TMP_AGE_MS) {
       const filePath = path.join(TMP_DIR, file);
       try {
         const stats = fs.statSync(filePath);
+        if (!stats.isFile()) continue;
         const isLogOrTrimmed = file.endsWith('.log') || file.endsWith('.mbtree') || file.includes('_trimmed');
         const age = now - stats.mtimeMs;
         // Purge intermediate log/trim files older than 10 mins, or any tmp files older than maxAgeMs
@@ -71,8 +73,8 @@ function readClipsJson() {
 }
 
 function writeClipsJson(clips) {
-  // Atomic file write using temporary file to prevent corruption on crash
-  const tmpFile = `${CLIPS_MANIFEST}.tmp`;
+  // Atomic file write using unique temporary file to prevent corruption or race condition on crash
+  const tmpFile = `${CLIPS_MANIFEST}.${crypto.randomUUID()}.tmp`;
   fs.writeFileSync(tmpFile, JSON.stringify(clips, null, 2), 'utf8');
   fs.renameSync(tmpFile, CLIPS_MANIFEST);
 }
@@ -96,6 +98,11 @@ app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; media-src 'self' blob:; img-src 'self' data: blob:; connect-src 'self';"
+  );
   next();
 });
 
@@ -128,7 +135,7 @@ const ACCEPTED_EXTS = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.ts', '
 
 const upload = multer({
   storage,
-  limits: { fileSize: 5 * 1024 * 1024 * 1024 }, // 5 GB max upload
+  limits: { fileSize: 5 * 1024 * 1024 * 1024, files: 1 }, // 5 GB max upload, 1 file per request
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
     // Strictly verify both extension and video MIME type
@@ -273,9 +280,8 @@ app.post('/api/compress', async (req, res) => {
  */
 app.use('/tmp', (req, res, next) => {
   const safeName = path.basename(req.path);
-  const ext = path.extname(safeName).toLowerCase();
 
-  if (!['.mp4', '.gif', '.mp3'].includes(ext) || !safeName.includes('_compressed')) {
+  if (!COMPRESSED_FILE_REGEX.test(safeName)) {
     return res.status(403).json({ error: 'Access denied' });
   }
 
@@ -294,6 +300,11 @@ app.use('/tmp', (req, res, next) => {
  */
 app.get('/api/download/:filename', (req, res) => {
   const safeFilename = path.basename(req.params.filename);
+
+  if (!COMPRESSED_FILE_REGEX.test(safeFilename)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
   const outputFile = path.join(TMP_DIR, safeFilename);
 
   if (!outputFile.startsWith(TMP_DIR) || !fs.existsSync(outputFile)) {
@@ -343,8 +354,14 @@ app.get('/api/progress/:id', (req, res) => {
     } catch (_) {}
   }, 15000);
 
+  // Safety timeout: automatically close orphaned SSE connection after 30 minutes
+  const maxConnectionTimeout = setTimeout(() => {
+    try { res.end(); } catch (_) {}
+  }, 30 * 60 * 1000);
+
   // Clean up on disconnect
   req.on('close', () => {
+    clearTimeout(maxConnectionTimeout);
     clearInterval(pingInterval);
     const clients = progressClients.get(id) || [];
     const idx = clients.indexOf(res);
@@ -414,8 +431,8 @@ app.post('/api/clips/save', async (req, res) => {
       } catch (_) {}
     }
 
-    const safeTitle = String(title || originalName || `Clip ${clipId.slice(0, 6)}`).replace(/[\r\n]/g, ' ').trim();
-    const safeOrigName = String(originalName || title || `video${actualExt}`).replace(/[\r\n]/g, ' ').trim();
+    const safeTitle = String(title || originalName || `Clip ${clipId.slice(0, 6)}`).replace(/[\r\n]/g, ' ').trim().slice(0, 200);
+    const safeOrigName = String(originalName || title || `video${actualExt}`).replace(/[\r\n]/g, ' ').trim().slice(0, 200);
 
     const clipObj = {
       id: clipId,
@@ -483,7 +500,7 @@ app.post('/api/clips/upload', (req, res) => {
         clipDuration = meta.duration || 0;
       } catch (_) {}
 
-      const safeTitle = path.basename(req.file.originalname).replace(/[\r\n]/g, ' ').trim();
+      const safeTitle = path.basename(req.file.originalname).replace(/[\r\n]/g, ' ').trim().slice(0, 200);
 
       const clipObj = {
         id: clipId,
@@ -504,6 +521,9 @@ app.post('/api/clips/upload', (req, res) => {
 
       res.json({ success: true, clip: clipObj });
     } catch (e) {
+      if (fs.existsSync(destFile)) {
+        try { fs.unlinkSync(destFile); } catch (_) {}
+      }
       res.status(500).json({ error: 'Failed to save clip' });
     }
   });
@@ -515,22 +535,65 @@ app.post('/api/clips/upload', (req, res) => {
  */
 app.get('/api/clips/stream/:filename', (req, res) => {
   const safeFilename = path.basename(req.params.filename);
+
+  // Forbid non-clip files such as clips.json and .gitkeep
+  if (safeFilename === 'clips.json' || safeFilename === '.gitkeep') {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
   const filePath = path.join(CLIPS_DIR, safeFilename);
 
   if (!filePath.startsWith(CLIPS_DIR) || !fs.existsSync(filePath)) {
     return res.status(404).json({ error: 'Clip file not found' });
   }
 
+  const clips = readClipsJson();
+  const clip = clips.find(c => c.filename === safeFilename);
+  if (!clip) {
+    return res.status(404).json({ error: 'Clip not found in library' });
+  }
+
   const stat = fs.statSync(filePath);
   const fileSize = stat.size;
+
+  if (fileSize === 0) {
+    res.writeHead(200, {
+      'Content-Length': 0,
+      'Content-Type': getMimeType(filePath),
+    });
+    return res.end();
+  }
+
   const range = req.headers.range;
 
   if (range) {
-    const parts = range.replace(/bytes=/, "").split("-");
-    const start = parseInt(parts[0], 10);
-    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+    const match = range.match(/^bytes=(\d*)-(\d*)$/);
+    if (!match) {
+      res.setHeader('Content-Range', `bytes */${fileSize}`);
+      return res.status(416).end();
+    }
+
+    let start = match[1] ? parseInt(match[1], 10) : NaN;
+    let end = match[2] ? parseInt(match[2], 10) : NaN;
+
+    if (isNaN(start) && isNaN(end)) {
+      res.setHeader('Content-Range', `bytes */${fileSize}`);
+      return res.status(416).end();
+    }
+
+    if (isNaN(start)) {
+      start = Math.max(0, fileSize - end);
+      end = fileSize - 1;
+    } else if (isNaN(end) || end >= fileSize) {
+      end = fileSize - 1;
+    }
+
+    if (start >= fileSize || start > end || start < 0) {
+      res.setHeader('Content-Range', `bytes */${fileSize}`);
+      return res.status(416).end();
+    }
+
     const chunksize = (end - start) + 1;
-    const file = fs.createReadStream(filePath, { start, end });
     const head = {
       'Content-Range': `bytes ${start}-${end}/${fileSize}`,
       'Accept-Ranges': 'bytes',
@@ -538,14 +601,25 @@ app.get('/api/clips/stream/:filename', (req, res) => {
       'Content-Type': getMimeType(filePath),
     };
     res.writeHead(206, head);
-    file.pipe(res);
+    const stream = fs.createReadStream(filePath, { start, end });
+    stream.on('error', () => {
+      if (!res.headersSent) res.status(500).end();
+    });
+    req.on('close', () => stream.destroy());
+    stream.pipe(res);
   } else {
     const head = {
+      'Accept-Ranges': 'bytes',
       'Content-Length': fileSize,
       'Content-Type': getMimeType(filePath),
     };
     res.writeHead(200, head);
-    fs.createReadStream(filePath).pipe(res);
+    const stream = fs.createReadStream(filePath);
+    stream.on('error', () => {
+      if (!res.headersSent) res.status(500).end();
+    });
+    req.on('close', () => stream.destroy());
+    stream.pipe(res);
   }
 });
 
@@ -555,6 +629,11 @@ app.get('/api/clips/stream/:filename', (req, res) => {
  */
 app.get('/api/clips/download/:filename', (req, res) => {
   const safeFilename = path.basename(req.params.filename);
+
+  if (safeFilename === 'clips.json' || safeFilename === '.gitkeep') {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
   const filePath = path.join(CLIPS_DIR, safeFilename);
 
   if (!filePath.startsWith(CLIPS_DIR) || !fs.existsSync(filePath)) {
@@ -563,6 +642,10 @@ app.get('/api/clips/download/:filename', (req, res) => {
 
   const clips = readClipsJson();
   const clip = clips.find(c => c.filename === safeFilename);
+  if (!clip) {
+    return res.status(404).json({ error: 'Clip not found in library' });
+  }
+
   const rawDownloadName = clip ? clip.originalName : safeFilename;
   const safeDownloadName = path.basename(rawDownloadName).replace(/["\r\n]/g, '_');
 
@@ -595,7 +678,7 @@ app.delete('/api/clips/:id', (req, res) => {
   const safeFilename = path.basename(clip.filename);
   const filePath = path.join(CLIPS_DIR, safeFilename);
 
-  if (filePath.startsWith(CLIPS_DIR) && fs.existsSync(filePath)) {
+  if (safeFilename !== 'clips.json' && safeFilename !== '.gitkeep' && filePath.startsWith(CLIPS_DIR) && fs.existsSync(filePath)) {
     try {
       fs.unlinkSync(filePath);
     } catch (e) {

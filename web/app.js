@@ -975,8 +975,8 @@
           compareOriginal.currentTime = startSec;
           compareOutput.currentTime = 0;
         }
-        compareOriginal.play();
-        compareOutput.play();
+        compareOriginal.play().catch(() => {});
+        compareOutput.play().catch(() => {});
         comparePlayText.textContent = 'Pause Both';
       } else {
         compareOriginal.pause();
@@ -999,8 +999,7 @@
       compareOriginal.currentTime = startSec;
       compareOutput.currentTime = 0;
       if (!compareOriginal.paused) {
-        compareOriginal.play();
-        compareOutput.play();
+        compareOriginal.play().catch(() => {});
       }
     });
   }
@@ -1066,7 +1065,7 @@
       const dateStr = clip.createdAt ? new Date(clip.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'Recently';
       const safeTitle = escapeHTML(clip.title || clip.originalName || 'Untitled Clip');
       const safeFormat = escapeHTML(clip.format || 'MP4').toUpperCase();
-      const safeStreamUrl = encodeURI(clip.streamUrl || `/api/clips/stream/${clip.filename}`);
+      const safeStreamUrl = encodeURI(clip.streamUrl || `/api/clips/stream/${encodeURIComponent(clip.filename)}`);
 
       row.innerHTML = `
         <div class="thumb">
@@ -1099,6 +1098,15 @@
     activeClipMeta.textContent = `${(clip.format || 'MP4').toUpperCase()}  •  ${formatBytes(clip.size)}  •  ${dateStr}`;
     activeClipDownloadBtn.href = clip.downloadUrl || `/api/clips/download/${encodeURIComponent(clip.filename)}`;
 
+    if (activeClipDownloadBtn) {
+      activeClipDownloadBtn.style.pointerEvents = '';
+      activeClipDownloadBtn.style.opacity = '1';
+    }
+    if (activeClipDeleteBtn) {
+      activeClipDeleteBtn.disabled = false;
+      activeClipDeleteBtn.style.opacity = '1';
+    }
+
     // Load stream into player
     ytVideo.src = clip.streamUrl || `/api/clips/stream/${encodeURIComponent(clip.filename)}`;
     ytVideo.load();
@@ -1115,7 +1123,20 @@
     }
     if (activeClipTitle) activeClipTitle.textContent = 'No clips stored';
     if (activeClipMeta) activeClipMeta.textContent = '—';
-    if (ytVideo) ytVideo.src = '';
+    if (ytVideo) {
+      ytVideo.pause();
+      ytVideo.removeAttribute('src');
+      ytVideo.load();
+    }
+    if (activeClipDownloadBtn) {
+      activeClipDownloadBtn.style.pointerEvents = 'none';
+      activeClipDownloadBtn.style.opacity = '0.5';
+      activeClipDownloadBtn.removeAttribute('href');
+    }
+    if (activeClipDeleteBtn) {
+      activeClipDeleteBtn.disabled = true;
+      activeClipDeleteBtn.style.opacity = '0.5';
+    }
   }
 
   // Delete clip action

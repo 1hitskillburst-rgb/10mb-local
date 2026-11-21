@@ -111,6 +111,12 @@ node cli/index.js --input myvideo.mp4 --target 10
 # Output: myvideo_compressed.mp4
 ```
 
+### Run (tests & security audit)
+
+```bash
+npm test
+```
+
 ---
 
 ## Core Logic (Pseudocode)
@@ -124,11 +130,10 @@ function compress(inputPath, outputPath, targetMB = 10) {
     (targetBytes * 8) / duration / 1000 - audioBitrate // kbps
   );
 
-  // Two-pass encode
+  // Single-pass constrained VBV encode
   ffmpeg(inputPath)
     .videoBitrate(targetBitrate)
     .audioBitrate(audioBitrate)
-    .twoPass(true)
     .output(outputPath)
     .run();
 }
@@ -136,15 +141,19 @@ function compress(inputPath, outputPath, targetMB = 10) {
 
 ---
 
-## Planned Features
+## Features & Implementation Status
 
-- [ ] Drag-and-drop upload
-- [ ] Live compression progress bar
-- [ ] Adjustable target size (slider or input, min 10MB)
-- [ ] Before/after file size display
-- [ ] Quality preview before downloading
+- [x] Drag-and-drop upload with format validation
+- [x] Live compression progress bar (SSE real-time streaming)
+- [x] Adjustable target size (slider and preset chips: 10MB, 16MB, 20MB, 50MB)
+- [x] Before/after file size display with savings percentage
+- [x] Quality preview player & side-by-side synchronized comparison
+- [x] Interactive video trimming scrubber with keyframe-aligned cuts
+- [x] Audio volume (0-200%), muting, and bitrate controls
+- [x] Multi-format conversion (MP4 video, Animated GIF, MP3 audio)
+- [x] Stored clips library with HTTP 206 partial content range streaming
+- [x] Security-hardened (CSP, zero server path leaks, strict regex validation, traversal protection)
 - [ ] Batch compression (multiple files)
-- [ ] Format options (keep original vs. force MP4)
 - [ ] Optional: client-side compression via WebAssembly (FFmpeg.wasm) — no server needed
 
 ---

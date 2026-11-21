@@ -3,6 +3,7 @@ const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const ffprobePath = require('@ffprobe-installer/ffprobe').path;
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 
 // Point fluent-ffmpeg to the installed binary
 ffmpeg.setFfmpegPath(ffmpegPath);
@@ -32,6 +33,12 @@ function probeVideo(inputPath) {
       }
       if ((!duration || duration <= 0) && format.tags && format.tags.DURATION) {
         const parts = String(format.tags.DURATION).split(':');
+        if (parts.length === 3) {
+          duration = (parseFloat(parts[0]) || 0) * 3600 + (parseFloat(parts[1]) || 0) * 60 + (parseFloat(parts[2]) || 0);
+        }
+      }
+      if ((!duration || duration <= 0) && videoStream && videoStream.tags && videoStream.tags.DURATION) {
+        const parts = String(videoStream.tags.DURATION).split(':');
         if (parts.length === 3) {
           duration = (parseFloat(parts[0]) || 0) * 3600 + (parseFloat(parts[1]) || 0) * 60 + (parseFloat(parts[2]) || 0);
         }
@@ -92,7 +99,8 @@ async function compress(inputPath, outputPath, targetMB = 10, onProgress = () =>
   // --- Pre-trim step with guaranteed cleanup in try/finally ---
   let encodePath = inputPath;
   let duration = fullDuration;
-  const trimmedPath = outputPath.replace(/\.[^.]+$/, '') + '_trimmed.mkv';
+  const randomSuffix = crypto.randomBytes(4).toString('hex');
+  const trimmedPath = outputPath.replace(/\.[^.]+$/, '') + `_trimmed_${randomSuffix}.mkv`;
   let needsTrimCleanup = false;
 
   try {
@@ -143,8 +151,9 @@ async function compress(inputPath, outputPath, targetMB = 10, onProgress = () =>
       }
       console.log('[Format] Extracting MP3 audio...');
       onProgress({ percent: 10, stage: 'compressing' });
+      const mp3Bitrate = parseInt(options.audioBitrate, 10) || 192;
       await new Promise((resolve, reject) => {
-        const cmd = ffmpeg(encodePath).noVideo().audioCodec('libmp3lame').audioBitrate(192);
+        const cmd = ffmpeg(encodePath).noVideo().audioCodec('libmp3lame').audioBitrate(mp3Bitrate);
         if (volume !== 1) {
           cmd.audioFilter(`volume=${volume.toFixed(2)}`);
         }
@@ -178,10 +187,10 @@ async function compress(inputPath, outputPath, targetMB = 10, onProgress = () =>
         vfFilters.push("crop='trunc(if(gte(a\\,9/16)\\,ih*9/16\\,iw)/2)*2':'trunc(if(gte(a\\,9/16)\\,ih\\,iw*16/9)/2)*2'");
       }
 
-      let scaleFilter = 'scale=480:-1:flags=lanczos';
+      let scaleFilter = 'scale=min(480\\,iw):-2:flags=lanczos';
       const reqRes = String(options.resolution || 'auto').toLowerCase();
       if (['1080', '720', '480', '360'].includes(reqRes)) {
-        scaleFilter = `scale=-1:${reqRes}:flags=lanczos`;
+        scaleFilter = `scale=-2:${reqRes}:flags=lanczos`;
       }
       vfFilters.push(`fps=15,${scaleFilter},split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse`);
 
@@ -342,7 +351,7 @@ async function compress(inputPath, outputPath, targetMB = 10, onProgress = () =>
     return {
       originalSize: parseInt(meta.size, 10),
       compressedSize: compressedStats.size,
-      duration: meta.duration,
+      duration: duration,
     };
   } finally {
     // Guaranteed cleanup of intermediate trimmed files, even on failure
