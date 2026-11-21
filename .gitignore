@@ -1,0 +1,11 @@
+node_modules/
+tmp/
+*.log
+.DS_Store
+Thumbs.db
+.env
+.env.*
+
+# User uploaded and processed clips (prevents privacy/leak issues)
+storage/clips/*
+!storage/clips/.gitkeep

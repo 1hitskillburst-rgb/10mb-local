@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="description" content="10mb.video squeezes a video down to the exact file size you choose — fast, precise, and powered by FFmpeg two-pass precision encoding.">
+  <title>10mb.video</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="frame">
+
+    <!-- Top Navigation Bar -->
+    <nav>
+      <button class="brand" data-go="home" aria-label="10mb.video Home">
+        10mb<span class="or">.video</span>
+      </button>
+
+      <div class="links">
+        <button data-go="home" aria-current="page">Upload</button>
+        <button data-go="studio">Compressor</button>
+        <button data-go="clips">Clips</button>
+      </div>
+
+      <div class="end">
+        <button class="theme-toggle-btn" id="themeToggle" title="Toggle dark/light theme" aria-label="Toggle theme">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="5"></circle>
+            <line x1="12" y1="1" x2="12" y2="3"></line>
+            <line x1="12" y1="21" x2="12" y2="23"></line>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+            <line x1="1" y1="12" x2="3" y2="12"></line>
+            <line x1="21" y1="12" x2="23" y2="12"></line>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+          </svg>
+        </button>
+
+        <button data-go="clips" id="navClipsBtn">
+          Stored clips<span class="badge" id="navClipBadge">0</span>
+        </button>
+      </div>
+    </nav>
+
+    <!-- ==========================================
+         PAGE 1: UPLOAD (HOME)
+         ========================================== -->
+    <main id="home" class="view on">
+      <div class="hero">
+        <div>
+          <span class="small">Two-pass encoding</span>
+          <svg class="ring" id="ring" viewBox="-100 -100 200 200" aria-hidden="true"></svg>
+          <h1 class="h1">Shrink it<br>to size.</h1>
+        </div>
+        <div>
+          <span class="small" style="position:absolute;top:28px;left:28px">Formats: MP4 MOV AVI MKV WebM FLV TS</span>
+        </div>
+        <div>
+          <span class="small" style="position:absolute;top:28px;right:28px">Precision Two-Pass FFmpeg</span>
+          <p class="lede">10mb.video squeezes a clip down to <span class="or">the exact file size you choose</span>, so it fits email, WhatsApp or Discord without a quality fight.</p>
+        </div>
+      </div>
+
+      <div class="drop">
+        <div class="dzwrap">
+          <div class="dz" id="dropZone" tabindex="0" role="button" aria-label="Drop your video here or pick a file from your device">
+            <div class="ico">
+              <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 001 1h14a1 1 0 001-1v-3"/>
+              </svg>
+            </div>
+            <div style="flex:1">
+              <b>Drop your video here</b>
+              <span style="color:var(--mute);font-size:14px">or pick a file from your device</span>
+            </div>
+            <button class="btn" id="chooseFileBtn" type="button">Choose file</button>
+            <input type="file" id="fileInput" accept="video/*,.mp4,.mov,.avi,.mkv,.webm,.flv,.ts" hidden>
+          </div>
+        </div>
+
+        <div>
+          <span class="small">Stored clips</span>
+          <p style="margin:6px 0 14px;font-size:22px;letter-spacing:-.03em" id="homeClipCount">0 clips saved</p>
+          <button class="btn ghost" data-go="clips" type="button">View stored clips</button>
+        </div>
+      </div>
+    </main>
+
+    <!-- ==========================================
+         PAGE 2: COMPRESSOR STUDIO
+         ========================================== -->
+    <main id="studio" class="view">
+      <div class="studio">
+
+        <!-- Left Section: Video Trimmer & Preview -->
+        <section>
+          <div class="head">
+            <h2>Trim your clip</h2>
+            <span class="small" id="studioDuration">Length 0:00</span>
+          </div>
+
+          <!-- Video Preview Player -->
+          <div class="player" id="studioPlayerWrap">
+            <video id="videoPreview" muted playsinline></video>
+            <button class="play" id="playBtn" type="button" aria-label="Play preview">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="#f2552c" id="playIcon">
+                <path d="M7 4l13 8-13 8z"/>
+              </svg>
+            </button>
+          </div>
+
+          <!-- Trim Range Scrubber -->
+          <div class="trim" id="trimBar" aria-label="Trim range scrubber">
+            <div class="trim-track-selected" id="trimSelected"></div>
+            <i class="trim-handle" id="trimHandleStart" tabindex="0" role="slider" aria-label="Trim start"></i>
+            <i class="trim-handle" id="trimHandleEnd" tabindex="0" role="slider" aria-label="Trim end"></i>
+            <div class="trim-playhead" id="trimPlayhead"></div>
+          </div>
+
+          <!-- Monospace Tabular Timestamps -->
+          <div class="times">
+            <div>
+              <span class="small">Start</span>
+              <b id="trimStartTime">0:00</b>
+            </div>
+            <div style="text-align:center">
+              <span class="small">Playhead</span>
+              <b class="or" id="trimCurrentTime">0:00</b>
+            </div>
+            <div style="text-align:right">
+              <span class="small">End</span>
+              <b id="trimEndTime">0:00</b>
+            </div>
+          </div>
+
+          <!-- Volume Controls -->
+          <div class="volume-row">
+            <button type="button" class="mute-btn" id="audioMuteBtn" aria-label="Toggle mute">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" id="audioIcon">
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+                <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/>
+              </svg>
+            </button>
+            <span class="small">Volume</span>
+            <input type="range" id="volumeSlider" min="0" max="200" value="100" aria-label="Audio volume">
+            <b id="volumeLabel" style="font-weight:500;width:48px;text-align:right">100%</b>
+          </div>
+        </section>
+
+        <!-- Right Section: Compression Options Console -->
+        <section>
+          <!-- Selected File Header -->
+          <div class="file">
+            <div>
+              <b id="fileName">video.mp4</b><br>
+              <span class="small" id="fileSize">0 MB</span>
+            </div>
+            <button class="btn ghost" id="changeFileBtn" data-go="home" style="padding:8px 16px;font-size:13px" type="button">
+              Change file
+            </button>
+          </div>
+
+          <!-- Output Format Tabs -->
+          <span class="small">Output format</span>
+          <div class="seg" id="fmt">
+            <button type="button" class="on" data-format="mp4">MP4 video</button>
+            <button type="button" data-format="gif">Animated GIF</button>
+            <button type="button" data-format="mp3">MP3 audio</button>
+          </div>
+
+          <!-- Target File Size Display -->
+          <div class="size">
+            <div>
+              <span class="small">Target file size</span><br>
+              <span class="ok" id="qualityEst">Excellent quality (~3.2 Mbps)</span>
+            </div>
+            <div class="big">
+              <span id="sz">10</span> <span style="font-size:22px;letter-spacing:-.02em">MB</span>
+            </div>
+          </div>
+
+          <!-- Preset Target Chips -->
+          <div class="chips" id="chips">
+            <button type="button" class="chip on" data-v="10">Email 10 MB</button>
+            <button type="button" class="chip" data-v="16">WhatsApp 16 MB</button>
+            <button type="button" class="chip" data-v="20">Discord 20 MB</button>
+            <button type="button" class="chip" data-v="50">Twitter/X 50 MB</button>
+          </div>
+
+          <!-- Target Size Range Slider (Minimum 10MB) -->
+          <input type="range" id="slider" min="10" max="100" value="10" step="1" aria-label="Target size in megabytes">
+
+          <!-- Encoding Options -->
+          <h3 style="font-weight:500;font-size:20px;letter-spacing:-.03em;margin:26px 0 12px;padding-top:20px;border-top:1px solid var(--line)">
+            Encoding options
+          </h3>
+
+          <div class="opts">
+            <label>Resolution
+              <select id="resolutionSelect">
+                <option value="auto" selected>Auto (smart scale)</option>
+                <option value="original">Original size</option>
+                <option value="1080">1080p</option>
+                <option value="720">720p</option>
+                <option value="480">480p</option>
+                <option value="360">360p</option>
+              </select>
+            </label>
+
+            <label>Frame rate
+              <select id="fpsSelect">
+                <option value="auto" selected>Auto (recommended)</option>
+                <option value="original">Original FPS</option>
+                <option value="60">60 fps</option>
+                <option value="30">30 fps</option>
+                <option value="24">24 fps</option>
+              </select>
+            </label>
+
+            <label>Playback speed
+              <select id="speedSelect">
+                <option value="1.0" selected>1.0x (normal)</option>
+                <option value="0.5">0.5x</option>
+                <option value="0.75">0.75x</option>
+                <option value="1.25">1.25x</option>
+                <option value="1.5">1.5x</option>
+                <option value="2.0">2x</option>
+              </select>
+            </label>
+
+            <label>Aspect ratio
+              <select id="aspectSelect">
+                <option value="original" selected>Original</option>
+                <option value="16:9">16:9</option>
+                <option value="9:16">9:16 (Vertical)</option>
+                <option value="1:1">1:1 (Square)</option>
+              </select>
+            </label>
+
+            <label>Audio bitrate
+              <select id="audioSelect">
+                <option value="128" selected>128 kbps (standard AAC)</option>
+                <option value="96">96 kbps</option>
+                <option value="192">192 kbps</option>
+                <option value="64">64 kbps (compact)</option>
+                <option value="mute">Mute audio</option>
+              </select>
+            </label>
+          </div>
+
+          <!-- Compress Action Trigger Button -->
+          <button class="btn wide" id="compressBtn" type="button">
+            Compress to <span id="sz2">10</span> MB
+          </button>
+
+          <!-- Compression Progress Section -->
+          <div class="progress-card" id="progressCard">
+            <div class="progress-head">
+              <div>
+                <span class="progress-spinner"></span>
+                <span id="progressStatus" style="font-weight:500">Analyzing video streams…</span>
+              </div>
+              <span id="progressPercent" style="font-weight:600;color:var(--or)">0%</span>
+            </div>
+            <div class="prog-track">
+              <div class="prog-fill" id="progressBar"></div>
+            </div>
+          </div>
+
+          <!-- Compression Results Section -->
+          <div class="result-card" id="resultCard">
+            <span class="small or" style="font-weight:600">COMPRESSION COMPLETE</span>
+            <h3 style="font-weight:500;font-size:22px;margin:4px 0 14px">Ready for download</h3>
+
+            <span class="saved-pill" id="compressionRatio">0% smaller</span>
+
+            <div class="result-grid">
+              <div class="result-stat">
+                <span class="small">Original</span>
+                <b id="originalSize">0 MB</b>
+              </div>
+              <div class="result-stat">
+                <span class="small">Compressed</span>
+                <b class="or" id="compressedSize">0 MB</b>
+              </div>
+            </div>
+
+            <div class="result-actions">
+              <a class="btn wide" id="downloadBtn" href="#" download>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 3V15M12 15L8 11M12 15L16 11"/>
+                  <path d="M4 17V19C4 20.1046 4.89543 21 6 21H18C19.1046 21 20 20.1046 20 19V17"/>
+                </svg>
+                <span>Download Compressed File</span>
+              </a>
+
+              <button class="btn ghost wide" id="saveClipBtn" type="button">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                </svg>
+                <span>Save to Stored Clips</span>
+              </button>
+
+              <button class="btn ghost wide" id="openCompareBtn" type="button">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="2" y="3" width="20" height="18" rx="2"/>
+                  <path d="M12 3V21"/>
+                </svg>
+                <span>Compare Original vs Compressed</span>
+              </button>
+
+              <button class="btn ghost wide" data-go="home" type="button" style="margin-top:4px">
+                Compress Another Video
+              </button>
+            </div>
+          </div>
+
+        </section>
+      </div>
+    </main>
+
+    <!-- ==========================================
+         PAGE 3: STORED CLIPS
+         ========================================== -->
+    <main id="clips" class="view">
+      <div class="clips">
+
+        <!-- Left Section: Main Player & Controls -->
+        <section>
+          <div class="player" id="clipsPlayerWrap" style="aspect-ratio:16/9">
+            <video id="ytVideo" playsinline controls></video>
+          </div>
+
+          <div class="cbar">
+            <div>
+              <h3 id="activeClipTitle">Select a clip to play</h3>
+              <span class="small" id="activeClipMeta">—</span>
+            </div>
+            <div>
+              <a class="btn" id="activeClipDownloadBtn" href="#" download>Download clip</a>
+              <button class="btn ghost danger" id="activeClipDeleteBtn" type="button">Delete</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Right Section: Clips Library Playlist -->
+        <section>
+          <div class="head">
+            <h2 style="font-size:32px">Library</h2>
+            <span class="small" id="sidebarCount">0 clips</span>
+          </div>
+
+          <div class="search">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--mute)">
+              <circle cx="11" cy="11" r="8"/>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+            <input type="text" id="searchInput" placeholder="Search stored clips" aria-label="Search stored clips">
+          </div>
+
+          <!-- Stored clips rendered dynamically -->
+          <div class="clips-list" id="clipsList">
+            <!-- Loaded via app.js -->
+          </div>
+
+          <div style="margin-top:24px;display:flex;gap:12px;align-items:center">
+            <label class="btn ghost" style="cursor:pointer" title="Directly upload a video file to library">
+              <span>Upload clip</span>
+              <input type="file" id="directUploadInput" accept="video/*" hidden>
+            </label>
+            <button class="btn ghost" data-go="home" type="button">Compress video</button>
+          </div>
+        </section>
+
+      </div>
+    </main>
+
+    <!-- Side-by-Side Synchronized Comparison Modal -->
+    <div class="modal-overlay" id="compareModal" role="dialog" aria-modal="true" aria-label="Synchronized Comparison">
+      <div class="modal-card">
+        <div class="modal-header">
+          <div style="display:flex;align-items:center;gap:10px">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--or)" stroke-width="2">
+              <rect x="2" y="3" width="20" height="18" rx="2"/>
+              <path d="M12 3V21"/>
+            </svg>
+            <h3>Side-by-Side Comparison</h3>
+          </div>
+          <div style="display:flex;gap:10px;align-items:center">
+            <button class="btn" id="comparePlayBtn" type="button" style="padding:6px 14px;font-size:13px">
+              <span id="comparePlayText">Play Both</span>
+            </button>
+            <button class="btn ghost" id="closeCompareModal" type="button" style="padding:6px 12px;font-size:14px" aria-label="Close modal">✕</button>
+          </div>
+        </div>
+
+        <div class="modal-body">
+          <div class="compare-grid">
+            <div class="compare-box">
+              <span class="small">ORIGINAL (TRIMMED)</span>
+              <div class="compare-video-wrap">
+                <video id="compareOriginal" muted playsinline></video>
+              </div>
+            </div>
+            <div class="compare-box">
+              <span class="small or">COMPRESSED ENCODE</span>
+              <div class="compare-video-wrap">
+                <video id="compareOutput" muted playsinline></video>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div class="toast" id="toast"></div>
+
+    <!-- Footer -->
+    <footer>
+      <span class="small">10mb.video</span>
+      <span class="small">FFmpeg two-pass precision encoding</span>
+    </footer>
+
+  </div>
+
+  <script src="app.js" defer></script>
+</body>
+</html>
