@@ -97,6 +97,10 @@ button {
   outline-offset: 2px;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 /* ---------- Master Frame ---------- */
 .frame {
   max-width: 1240px;
@@ -475,6 +479,7 @@ h2 {
 }
 
 .play {
+  position: absolute;
   width: 64px;
   height: 64px;
   border-radius: 50%;
@@ -603,7 +608,7 @@ h2 {
   font-weight: 500;
   font-size: 18px;
   letter-spacing: -0.02em;
-  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 
 .seg {
@@ -1005,6 +1010,7 @@ select:disabled {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
   gap: 16px;
   margin-top: 20px;
   padding-top: 18px;
@@ -1016,7 +1022,7 @@ select:disabled {
   font-weight: 500;
   font-size: 22px;
   letter-spacing: -0.03em;
-  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 
 .cbar div:last-child {
