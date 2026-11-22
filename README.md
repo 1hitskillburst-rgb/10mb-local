@@ -150,7 +150,7 @@ function compress(inputPath, outputPath, targetMB = 10) {
 
 ## Features & Implementation Status
 
-- [x] Drag-and-drop upload with format validation
+- [x] Drag-and-drop upload with format validation (single and multi-file)
 - [x] Live compression progress bar (SSE real-time streaming)
 - [x] Adjustable target size (slider and preset chips: 10MB, 16MB, 20MB, 50MB)
 - [x] Before/after file size display with savings percentage
@@ -158,10 +158,13 @@ function compress(inputPath, outputPath, targetMB = 10) {
 - [x] Interactive video trimming scrubber with keyframe-aligned cuts
 - [x] Audio volume (0-200%), muting, and bitrate controls
 - [x] Multi-format conversion (MP4 video, Animated GIF, MP3 audio)
+- [x] Hardware acceleration support (NVIDIA NVENC, Intel QuickSync, AMD AMF with auto CPU fallback)
+- [x] Full-featured CLI command (`node cli/index.js` or `npm run cli`)
+- [x] Multi-file batch compression queue with sequential processing
+- [x] Docker & docker-compose self-hosting support
+- [x] Client-side compression via WebAssembly (FFmpeg.wasm) — 100% private, zero server uploads
 - [x] Stored clips library with HTTP 206 partial content range streaming
 - [x] Security-hardened (CSP, zero server path leaks, strict regex validation, traversal protection)
-- [ ] Batch compression (multiple files)
-- [ ] Optional: client-side compression via WebAssembly (FFmpeg.wasm) — no server needed
 
 ---
 

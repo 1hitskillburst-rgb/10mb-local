@@ -68,6 +68,7 @@
   const presetChips = document.querySelectorAll('#chips .chip');
   const resolutionSelect = document.getElementById('resolutionSelect');
   const encoderSelect = document.getElementById('encoderSelect');
+  const engineSelect = document.getElementById('engineSelect');
   const fpsSelect = document.getElementById('fpsSelect');
   const speedSelect = document.getElementById('speedSelect');
   const aspectSelect = document.getElementById('aspectSelect');
@@ -677,6 +678,127 @@
     if (statusText) progressStatus.textContent = statusText;
   }
 
+  // ==========================================
+  //  CLIENT-SIDE WEBASSEMBLY COMPRESSION (WASM)
+  // ==========================================
+  let wasmFFmpeg = null;
+
+  async function loadWasmFFmpeg() {
+    if (wasmFFmpeg) return wasmFFmpeg;
+
+    if (!window.FFmpeg) {
+      setProgress(5, 'Loading WebAssembly FFmpeg module from CDN...');
+      await new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = 'https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js';
+        script.onload = resolve;
+        script.onerror = () => reject(new Error('Failed to load WebAssembly FFmpeg script from CDN. Check your internet connection.'));
+        document.head.appendChild(script);
+      });
+    }
+
+    const { createFFmpeg } = window.FFmpeg;
+    wasmFFmpeg = createFFmpeg({
+      log: false,
+      corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
+    });
+
+    setProgress(15, 'Initializing WebAssembly core...');
+    await wasmFFmpeg.load();
+    return wasmFFmpeg;
+  }
+
+  async function startWasmCompression() {
+    compressBtn.disabled = true;
+    resultCard.classList.remove('visible');
+    progressCard.classList.add('visible');
+    setProgress(0, 'Preparing client-side encode (zero server uploads)...');
+
+    try {
+      const ffmpeg = await loadWasmFFmpeg();
+      const targetMB = parseInt(slider.value, 10) || 10;
+      const duration = getTrimDuration() || videoDuration || 10;
+      const speed = parseFloat(speedSelect.value) || 1.0;
+      const effectiveSec = duration / speed;
+      const totalBits = targetMB * 1024 * 1024 * 8 * 0.95;
+      const audioBitrate = audioSelect.value === 'mute' ? 0 : (parseInt(audioSelect.value, 10) || 128);
+      const audioBits = audioBitrate * 1000 * effectiveSec;
+      const videoBits = Math.max(0, totalBits - audioBits);
+      const videoBitrate = Math.max(64, Math.floor(videoBits / effectiveSec / 1000));
+
+      const inputExt = selectedFile.name.split('.').pop().toLowerCase() || 'mp4';
+      const inName = `input.${inputExt}`;
+      const outExt = selectedFormat === 'gif' || selectedFormat === 'mp3' ? selectedFormat : 'mp4';
+      const outName = `output.${outExt}`;
+
+      setProgress(25, 'Loading video into WebAssembly virtual memory...');
+      const fileData = await selectedFile.arrayBuffer();
+      ffmpeg.FS('writeFile', inName, new Uint8Array(fileData));
+
+      ffmpeg.setProgress(({ ratio }) => {
+        const pct = Math.min(95, Math.max(30, 30 + Math.round((ratio || 0) * 65)));
+        setProgress(pct, 'Encoding in browser (WebAssembly)...');
+      });
+
+      const args = ['-i', inName];
+      const trimStart = getTrimStartSeconds();
+      const trimEnd = getTrimEndSeconds();
+      if (trimStart > 0.1) args.push('-ss', String(trimStart.toFixed(2)));
+      if (trimEnd < videoDuration - 0.1) args.push('-to', String(trimEnd.toFixed(2)));
+
+      if (outExt === 'mp3') {
+        args.push('-vn', '-c:a', 'libmp3lame', '-b:a', `${audioBitrate || 192}k`);
+      } else if (outExt === 'gif') {
+        args.push('-vf', 'fps=12,scale=min(360\\,iw):-2:flags=lanczos');
+      } else {
+        args.push(
+          '-c:v', 'libx264',
+          '-b:v', `${videoBitrate}k`,
+          '-maxrate', `${Math.floor(videoBitrate * 1.15)}k`,
+          '-bufsize', `${Math.floor(videoBitrate * 2.0)}k`,
+          '-pix_fmt', 'yuv420p',
+          '-preset', 'ultrafast',
+          '-movflags', '+faststart'
+        );
+        if (audioBitrate === 0) {
+          args.push('-an');
+        } else {
+          args.push('-c:a', 'aac', '-b:a', `${audioBitrate}k`);
+        }
+      }
+      args.push('-y', outName);
+
+      setProgress(35, 'Encoding with FFmpeg.wasm in your browser...');
+      await ffmpeg.run(...args);
+
+      setProgress(98, 'Extracting completed file...');
+      const outData = ffmpeg.FS('readFile', outName);
+      const outBlob = new Blob([outData.buffer], { type: outExt === 'gif' ? 'image/gif' : (outExt === 'mp3' ? 'audio/mpeg' : 'video/mp4') });
+      const localUrl = URL.createObjectURL(outBlob);
+
+      // Clean up virtual FS to free browser memory
+      try { ffmpeg.FS('unlink', inName); } catch (_) {}
+      try { ffmpeg.FS('unlink', outName); } catch (_) {}
+
+      onCompressionDone({
+        originalSize: selectedFile.size,
+        compressedSize: outBlob.size,
+        duration: effectiveSec,
+        format: outExt,
+        downloadUrl: localUrl,
+        outputUrl: localUrl,
+      });
+
+      showToast('Client-side WebAssembly compression complete! (Zero server uploads)', 'success');
+
+    } catch (err) {
+      console.error('Wasm compression error:', err);
+      showToast(err.message || 'Client-side compression failed.', 'error');
+      progressCard.classList.remove('visible');
+      compressBtn.disabled = false;
+    }
+  }
+
   if (compressBtn) {
     compressBtn.addEventListener('click', () => {
       if (!selectedFile) {
@@ -692,6 +814,11 @@
       videoPreview.pause();
       isPlayingPreview = false;
       updatePlayPauseIcon();
+    }
+
+    if (engineSelect && engineSelect.value === 'wasm') {
+      await startWasmCompression();
+      return;
     }
 
     compressBtn.disabled = true;

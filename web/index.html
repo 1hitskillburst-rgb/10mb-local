@@ -201,6 +201,13 @@
           </h3>
 
           <div class="opts">
+            <label>Processing engine
+              <select id="engineSelect">
+                <option value="native" selected>Server (Native FFmpeg - Fastest)</option>
+                <option value="wasm">Client-Side WebAssembly (Zero Server Upload)</option>
+              </select>
+            </label>
+
             <label>Encoder / Acceleration
               <select id="encoderSelect">
                 <option value="auto" selected>Auto (best available)</option>
