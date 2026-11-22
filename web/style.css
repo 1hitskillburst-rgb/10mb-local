@@ -1159,6 +1159,131 @@ footer {
   }
 }
 
+/* ==========================================================================
+   PAGE 4: BATCH QUEUE
+   ========================================================================== */
+.batch-container {
+  padding: 32px 28px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.batch-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 24px;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.batch-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.batch-global-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 20px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+
+.batch-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.batch-item {
+  display: grid;
+  grid-template-columns: 2fr 130px 100px 140px 110px auto;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 20px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.batch-item.active {
+  border-color: var(--or);
+  background: rgba(242, 85, 44, 0.04);
+}
+
+.batch-item.done {
+  border-color: rgba(46, 174, 96, 0.35);
+}
+
+.batch-item-info {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.batch-item-info b {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 15px;
+}
+
+.batch-status-badge {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 100px;
+  text-align: center;
+  background: rgba(120, 100, 85, 0.12);
+  color: var(--mute);
+}
+
+.batch-status-badge.working {
+  background: rgba(242, 85, 44, 0.15);
+  color: var(--or);
+}
+
+.batch-status-badge.done {
+  background: rgba(46, 174, 96, 0.15);
+  color: #2eae60;
+}
+
+.batch-status-badge.failed {
+  background: rgba(235, 87, 87, 0.15);
+  color: #eb5757;
+}
+
+.batch-item-progress {
+  width: 100%;
+  height: 6px;
+  background: rgba(120, 100, 85, 0.15);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-top: 6px;
+}
+
+.batch-item-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--or);
+  transition: width 0.2s ease;
+}
+
+@media (max-width: 900px) {
+  .batch-item {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+}
+
 @media (prefers-reduced-motion: no-preference) {
   .ring {
     animation: spin 90s linear infinite;

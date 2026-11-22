@@ -26,9 +26,10 @@
 
   // ---- DOM Elements ----
   // Navigation & Views
-  const views = ['home', 'studio', 'clips'];
+  const views = ['home', 'studio', 'batch', 'clips'];
   const navLinks = document.querySelectorAll('.links button');
   const navClipBadge = document.getElementById('navClipBadge');
+  const navBatchBadge = document.getElementById('navBatchBadge');
   const homeClipCount = document.getElementById('homeClipCount');
   const themeToggle = document.getElementById('themeToggle');
 
@@ -104,6 +105,15 @@
   const searchInput = document.getElementById('searchInput');
   const clipsList = document.getElementById('clipsList');
   const directUploadInput = document.getElementById('directUploadInput');
+
+  // Batch Queue
+  const startBatchBtn = document.getElementById('startBatchBtn');
+  const batchAddInput = document.getElementById('batchAddInput');
+  const clearBatchBtn = document.getElementById('clearBatchBtn');
+  const batchList = document.getElementById('batchList');
+  const batchChips = document.querySelectorAll('#batchChips .chip');
+  let batchQueue = [];
+  let isProcessingBatch = false;
 
   // Toast
   const toastEl = document.getElementById('toast');
@@ -338,13 +348,21 @@
     dropZone.addEventListener('drop', (e) => {
       e.preventDefault();
       dropZone.classList.remove('dragover');
-      if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-        handleVideoFile(e.dataTransfer.files[0]);
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        if (e.dataTransfer.files.length > 1) {
+          addFilesToBatch(e.dataTransfer.files);
+        } else {
+          handleVideoFile(e.dataTransfer.files[0]);
+        }
       }
     });
     fileInput.addEventListener('change', () => {
-      if (fileInput.files && fileInput.files[0]) {
-        handleVideoFile(fileInput.files[0]);
+      if (fileInput.files && fileInput.files.length > 0) {
+        if (fileInput.files.length > 1) {
+          addFilesToBatch(fileInput.files);
+        } else {
+          handleVideoFile(fileInput.files[0]);
+        }
       }
       fileInput.value = '';
     });
@@ -1212,6 +1230,305 @@
         directUploadInput.value = '';
       }
     });
+  }
+
+  // ==========================================
+  //  BATCH COMPRESSION QUEUE CONTROLLER
+  // ==========================================
+
+  function updateBatchBadges() {
+    const count = batchQueue.length;
+    if (navBatchBadge) {
+      navBatchBadge.textContent = count;
+      navBatchBadge.style.display = count > 0 ? 'inline-block' : 'none';
+    }
+    if (startBatchBtn) {
+      const pending = batchQueue.filter(i => i.status !== 'done').length;
+      startBatchBtn.textContent = isProcessingBatch
+        ? 'Processing Batch…'
+        : `Start Batch (${pending} file${pending === 1 ? '' : 's'})`;
+      startBatchBtn.disabled = isProcessingBatch || pending === 0;
+    }
+    if (clearBatchBtn) {
+      clearBatchBtn.disabled = isProcessingBatch || count === 0;
+    }
+  }
+
+  function addFilesToBatch(files) {
+    if (!files || files.length === 0) return;
+    let added = 0;
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      if (!isVideoFile(file)) continue;
+
+      batchQueue.push({
+        uid: (crypto.randomUUID ? crypto.randomUUID() : String(Math.random())).slice(0, 8),
+        file,
+        name: file.name,
+        size: file.size,
+        targetMB: 10,
+        format: 'mp4',
+        status: 'ready', // 'ready' | 'uploading' | 'compressing' | 'done' | 'error'
+        percent: 0,
+        downloadUrl: null,
+        compressedSize: 0,
+        error: null,
+      });
+      added++;
+    }
+
+    if (added === 0) {
+      showToast('No valid video files detected.', 'error');
+      return;
+    }
+
+    showToast(`Added ${added} video${added === 1 ? '' : 's'} to batch queue`, 'normal');
+    updateBatchBadges();
+    renderBatchList();
+    go('batch');
+  }
+
+  function renderBatchList() {
+    if (!batchList) return;
+    batchList.innerHTML = '';
+
+    if (batchQueue.length === 0) {
+      batchList.innerHTML = `
+        <div style="padding: 48px 16px; text-align: center; color: var(--mute); border: 1px dashed var(--line); border-radius: 12px">
+          <p style="font-size: 17px; margin-bottom: 8px">Batch queue is empty</p>
+          <span class="small">Click "+ Add Files" or drop multiple videos on the upload page to start batch encoding.</span>
+        </div>
+      `;
+      return;
+    }
+
+    batchQueue.forEach((item, index) => {
+      const row = document.createElement('div');
+      row.className = `batch-item ${item.status === 'compressing' || item.status === 'uploading' ? 'active' : ''} ${item.status === 'done' ? 'done' : ''}`;
+      row.id = `batch-item-${item.uid}`;
+
+      const safeName = escapeHTML(item.name);
+      const isPending = item.status === 'ready';
+
+      let statusHtml = '';
+      if (item.status === 'ready') {
+        statusHtml = '<span class="batch-status-badge">Ready</span>';
+      } else if (item.status === 'uploading') {
+        statusHtml = `<span class="batch-status-badge working">Uploading ${Math.round(item.percent)}%</span>`;
+      } else if (item.status === 'compressing') {
+        statusHtml = `<span class="batch-status-badge working">Encoding ${Math.round(item.percent)}%</span>`;
+      } else if (item.status === 'done') {
+        const saved = item.size > 0 && item.compressedSize > 0
+          ? ` (${((1 - item.compressedSize / item.size) * 100).toFixed(0)}% saved)`
+          : '';
+        statusHtml = `<span class="batch-status-badge done">✓ ${formatBytes(item.compressedSize)}${saved}</span>`;
+      } else if (item.status === 'error') {
+        statusHtml = `<span class="batch-status-badge failed" title="${escapeHTML(item.error || 'Failed')}">Failed</span>`;
+      }
+
+      row.innerHTML = `
+        <div class="batch-item-info">
+          <b title="${safeName}">${safeName}</b>
+          <span class="small" style="margin-top:2px">${formatBytes(item.size)}</span>
+          <div class="batch-item-progress">
+            <div class="batch-item-progress-fill" style="width: ${item.percent}%"></div>
+          </div>
+        </div>
+
+        <div>
+          <label class="small" style="display:block;margin-bottom:4px">Target Size</label>
+          <select class="batch-target-select" ${isProcessingBatch || !isPending ? 'disabled' : ''} style="padding:6px 10px;font-size:13px;width:100%">
+            <option value="10" ${item.targetMB === 10 ? 'selected' : ''}>10 MB</option>
+            <option value="16" ${item.targetMB === 16 ? 'selected' : ''}>16 MB</option>
+            <option value="20" ${item.targetMB === 20 ? 'selected' : ''}>20 MB</option>
+            <option value="50" ${item.targetMB === 50 ? 'selected' : ''}>50 MB</option>
+            <option value="100" ${item.targetMB === 100 ? 'selected' : ''}>100 MB</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="small" style="display:block;margin-bottom:4px">Format</label>
+          <select class="batch-format-select" ${isProcessingBatch || !isPending ? 'disabled' : ''} style="padding:6px 10px;font-size:13px;width:100%">
+            <option value="mp4" ${item.format === 'mp4' ? 'selected' : ''}>MP4</option>
+            <option value="gif" ${item.format === 'gif' ? 'selected' : ''}>GIF</option>
+            <option value="mp3" ${item.format === 'mp3' ? 'selected' : ''}>MP3</option>
+          </select>
+        </div>
+
+        <div style="text-align:center">
+          ${statusHtml}
+        </div>
+
+        <div style="text-align:right">
+          ${item.status === 'done' && item.downloadUrl ? `
+            <a class="btn" href="${item.downloadUrl}" download style="padding:6px 14px;font-size:13px;text-decoration:none">Download</a>
+          ` : `
+            <button class="btn ghost danger batch-remove-btn" ${isProcessingBatch ? 'disabled' : ''} style="padding:6px 12px;font-size:13px" type="button">Remove</button>
+          `}
+        </div>
+      `;
+
+      // Change target size
+      const targetSel = row.querySelector('.batch-target-select');
+      if (targetSel) {
+        targetSel.addEventListener('change', () => {
+          item.targetMB = parseInt(targetSel.value, 10) || 10;
+        });
+      }
+
+      // Change format
+      const formatSel = row.querySelector('.batch-format-select');
+      if (formatSel) {
+        formatSel.addEventListener('change', () => {
+          item.format = formatSel.value;
+        });
+      }
+
+      // Remove item
+      const removeBtn = row.querySelector('.batch-remove-btn');
+      if (removeBtn) {
+        removeBtn.addEventListener('click', () => {
+          batchQueue.splice(index, 1);
+          updateBatchBadges();
+          renderBatchList();
+        });
+      }
+
+      batchList.appendChild(row);
+    });
+  }
+
+  // Batch Preset Chips
+  if (batchChips) {
+    batchChips.forEach(chip => {
+      chip.addEventListener('click', () => {
+        const mb = parseInt(chip.dataset.batchV, 10) || 10;
+        batchQueue.forEach(item => {
+          if (item.status === 'ready') item.targetMB = mb;
+        });
+        renderBatchList();
+        showToast(`Set all pending items to ${mb}MB target`, 'normal');
+      });
+    });
+  }
+
+  // Clear batch
+  if (clearBatchBtn) {
+    clearBatchBtn.addEventListener('click', () => {
+      if (isProcessingBatch) return;
+      if (batchQueue.length > 0 && confirm('Clear all files from batch queue?')) {
+        batchQueue = [];
+        updateBatchBadges();
+        renderBatchList();
+      }
+    });
+  }
+
+  // Add more files from Batch page
+  if (batchAddInput) {
+    batchAddInput.addEventListener('change', () => {
+      if (batchAddInput.files && batchAddInput.files.length > 0) {
+        addFilesToBatch(batchAddInput.files);
+      }
+      batchAddInput.value = '';
+    });
+  }
+
+  // Execute Batch Sequentially
+  async function startBatch() {
+    if (isProcessingBatch) return;
+    const pending = batchQueue.filter(i => i.status === 'ready');
+    if (pending.length === 0) {
+      showToast('No pending files to compress.', 'normal');
+      return;
+    }
+
+    isProcessingBatch = true;
+    updateBatchBadges();
+    renderBatchList();
+
+    for (let i = 0; i < batchQueue.length; i++) {
+      const item = batchQueue[i];
+      if (item.status === 'done') continue;
+
+      item.status = 'uploading';
+      item.percent = 0;
+      renderBatchList();
+
+      try {
+        // Step 1: Upload
+        const uploadData = await uploadFile(item.file);
+        const uploadedId = uploadData.id;
+
+        item.status = 'compressing';
+        item.percent = 10;
+        renderBatchList();
+
+        // Step 2: Subscribe to SSE progress
+        await new Promise((resolve, reject) => {
+          const sse = new EventSource(`/api/progress/${uploadedId}`);
+
+          sse.addEventListener('progress', (e) => {
+            try {
+              const d = JSON.parse(e.data);
+              item.percent = d.percent || 10;
+              const row = document.getElementById(`batch-item-${item.uid}`);
+              if (row) {
+                const fill = row.querySelector('.batch-item-progress-fill');
+                if (fill) fill.style.width = `${item.percent}%`;
+                const badge = row.querySelector('.batch-status-badge');
+                if (badge) badge.textContent = `Encoding ${Math.round(item.percent)}%`;
+              }
+            } catch (_) {}
+          });
+
+          sse.addEventListener('done', (e) => {
+            sse.close();
+            try {
+              const d = JSON.parse(e.data);
+              item.status = 'done';
+              item.percent = 100;
+              item.downloadUrl = d.downloadUrl;
+              item.compressedSize = d.compressedSize;
+              resolve();
+            } catch (err) {
+              reject(err);
+            }
+          });
+
+          sse.addEventListener('error', (e) => {
+            sse.close();
+            let msg = 'Encoding failed';
+            try {
+              if (e.data) msg = JSON.parse(e.data).message || msg;
+            } catch (_) {}
+            reject(new Error(msg));
+          });
+
+          // Step 3: Trigger compress
+          requestCompression(uploadedId, item.targetMB, 0, 0, 100, {
+            format: item.format,
+            encoder: encoderSelect ? encoderSelect.value : 'auto',
+          }).catch(reject);
+        });
+
+      } catch (err) {
+        item.status = 'error';
+        item.error = err.message || 'Compression failed';
+      }
+
+      renderBatchList();
+    }
+
+    isProcessingBatch = false;
+    updateBatchBadges();
+    renderBatchList();
+    showToast('Batch compression completed!', 'success');
+  }
+
+  if (startBatchBtn) {
+    startBatchBtn.addEventListener('click', startBatch);
   }
 
   // ==========================================

@@ -22,6 +22,7 @@
       <div class="links">
         <button data-go="home" aria-current="page">Upload</button>
         <button data-go="studio">Compressor</button>
+        <button data-go="batch">Batch<span class="badge" id="navBatchBadge" style="display:none;margin-left:6px">0</span></button>
         <button data-go="clips">Clips</button>
       </div>
 
@@ -78,7 +79,7 @@
               <span style="color:var(--mute);font-size:14px">or pick a file from your device</span>
             </div>
             <button class="btn" id="chooseFileBtn" type="button">Choose file</button>
-            <input type="file" id="fileInput" accept="video/*,.mp4,.mov,.avi,.mkv,.webm,.flv,.ts" hidden>
+            <input type="file" id="fileInput" accept="video/*,.mp4,.mov,.avi,.mkv,.webm,.flv,.ts" multiple hidden>
           </div>
         </div>
 
@@ -386,6 +387,45 @@
           </div>
         </section>
 
+      </div>
+    </main>
+
+    <!-- ==========================================
+         PAGE 4: BATCH COMPRESSION QUEUE
+         ========================================== -->
+    <main id="batch" class="view">
+      <div class="batch-container">
+        <div class="batch-header">
+          <div>
+            <span class="small or" style="font-weight:600">QUEUE PROCESSING</span>
+            <h2 style="font-size:32px;letter-spacing:-.03em;margin:4px 0 8px">Batch Compression</h2>
+            <p class="lede" style="margin:0;font-size:16px">Queue multiple videos, choose target sizes, and compress them sequentially.</p>
+          </div>
+          <div class="batch-actions">
+            <button class="btn" id="startBatchBtn" type="button" disabled>Start Batch (0 files)</button>
+            <label class="btn ghost" style="cursor:pointer" title="Add videos to queue">
+              <span>+ Add Files</span>
+              <input type="file" id="batchAddInput" accept="video/*,.mp4,.mov,.avi,.mkv,.webm,.flv,.ts" multiple hidden>
+            </label>
+            <button class="btn ghost danger" id="clearBatchBtn" type="button">Clear Queue</button>
+          </div>
+        </div>
+
+        <!-- Global Batch Settings Bar -->
+        <div class="batch-global-bar">
+          <span class="small" style="text-transform:uppercase;letter-spacing:.05em">Apply target size to all:</span>
+          <div class="chips" id="batchChips">
+            <button type="button" class="chip" data-batch-v="10">10 MB (Email)</button>
+            <button type="button" class="chip" data-batch-v="16">16 MB (WhatsApp)</button>
+            <button type="button" class="chip" data-batch-v="20">20 MB (Discord)</button>
+            <button type="button" class="chip" data-batch-v="50">50 MB (Twitter/X)</button>
+          </div>
+        </div>
+
+        <!-- Batch Queue List -->
+        <div class="batch-list" id="batchList">
+          <!-- Populated dynamically via app.js -->
+        </div>
       </div>
     </main>
 
