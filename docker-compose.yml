@@ -1,0 +1,12 @@
+services:
+  10mb-video:
+    build: .
+    container_name: 10mb-video
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - NODE_ENV=production
+    volumes:
+      - ./storage/clips:/app/storage/clips

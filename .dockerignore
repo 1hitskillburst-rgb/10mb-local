@@ -1,0 +1,11 @@
+node_modules
+tmp/*
+!tmp/.gitkeep
+storage/clips/*
+!storage/clips/.gitkeep
+.git
+.github
+*.log
+.DS_Store
+Thumbs.db
+test

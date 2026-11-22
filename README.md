@@ -104,6 +104,13 @@ npm start
 # Open http://localhost:3000
 ```
 
+### Run (Docker / Self-Hosting)
+
+```bash
+docker compose up -d
+# Open http://localhost:3000
+```
+
 ### Run (CLI)
 
 ```bash
