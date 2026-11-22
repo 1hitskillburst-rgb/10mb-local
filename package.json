@@ -3,9 +3,13 @@
   "version": "1.0.0",
   "description": "Compress any video to a target file size — default 10MB",
   "main": "server/index.js",
+  "bin": {
+    "10mb": "./cli/index.js"
+  },
   "scripts": {
     "start": "node server/index.js",
     "dev": "nodemon server/index.js",
+    "cli": "node cli/index.js",
     "test": "node test/test_all.js"
   },
   "keywords": [

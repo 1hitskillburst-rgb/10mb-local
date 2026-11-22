@@ -318,6 +318,18 @@ async function runTests() {
   assert.strictEqual(cleanupRes.json().success, true);
   console.log('  ✓ Cleanup endpoint verified');
 
+  // Test 14: CLI argument parsing and help output
+  console.log('[Test 14] CLI argument parsing & invocation...');
+  const { parseArgs } = require('../cli/index');
+  const parsed = parseArgs(['-i', 'test.mp4', '-t', '16', '-f', 'gif', '-s', '5', '-e', '15', '--mute']);
+  assert.strictEqual(parsed.input, 'test.mp4');
+  assert.strictEqual(parsed.target, 16);
+  assert.strictEqual(parsed.format, 'gif');
+  assert.strictEqual(parsed.trimStart, 5);
+  assert.strictEqual(parsed.trimEnd, 15);
+  assert.strictEqual(parsed.muteAudio, true);
+  console.log('  ✓ CLI argument parser verified');
+
   // Clean up any remaining test uploads
   try {
     const toClean = fs.readdirSync(TMP_DIR).filter(f => f.startsWith(uploadedId));
