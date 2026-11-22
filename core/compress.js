@@ -1,13 +1,30 @@
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const ffprobePath = require('@ffprobe-installer/ffprobe').path;
-const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const { calculateBitrateAndScaling } = require('./utils');
 
 // Point fluent-ffmpeg to the installed binary
 ffmpeg.setFfmpegPath(ffmpegPath);
 ffmpeg.setFfprobePath(ffprobePath);
+
+const DEFAULT_JOB_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes max per FFmpeg job
+const activeFfmpegCommands = new Set();
+
+/**
+ * Terminates all currently running FFmpeg child processes (used on graceful shutdown).
+ */
+function killActiveJobs() {
+  for (const cmd of activeFfmpegCommands) {
+    try {
+      cmd.kill('SIGKILL');
+    } catch (_) {
+      // Ignore already-exited processes
+    }
+  }
+  activeFfmpegCommands.clear();
+}
 
 let cachedEncoders = null;
 /**
@@ -34,18 +51,90 @@ function getHardwareEncoders() {
 }
 
 /**
+ * Runs a fluent-ffmpeg command with leak-free tracking, hard timeout, and AbortSignal support.
+ */
+function runFfmpegCommand(cmd, { timeoutMs = DEFAULT_JOB_TIMEOUT_MS, signal } = {}) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer = null;
+
+    const cleanup = () => {
+      activeFfmpegCommands.delete(cmd);
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      if (signal) {
+        signal.removeEventListener('abort', onAbort);
+      }
+    };
+
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err);
+    };
+
+    const succeed = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+
+    const onAbort = () => {
+      try { cmd.kill('SIGKILL'); } catch (_) {}
+      fail(new Error('Compression cancelled.'));
+    };
+
+    if (signal && signal.aborted) {
+      return fail(new Error('Compression cancelled.'));
+    }
+
+    if (signal) {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => {
+        try { cmd.kill('SIGKILL'); } catch (_) {}
+        fail(new Error('Compression timed out. Please try a shorter clip or lower resolution.'));
+      }, timeoutMs);
+      if (typeof timer.unref === 'function') timer.unref();
+    }
+
+    activeFfmpegCommands.add(cmd);
+
+    cmd
+      .on('error', (err) => fail(err))
+      .on('end', succeed);
+
+    try {
+      cmd.run();
+    } catch (err) {
+      fail(err);
+    }
+  });
+}
+
+/**
  * Probe a video file to get duration and other metadata with multi-stream fallbacks.
  * @param {string} inputPath - Absolute path to the video file
- * @returns {Promise<{duration: number, size: number, videoCodec: string, audioCodec: string, hasAudio: boolean, width: number, height: number}>}
+ * @returns {Promise<{duration: number, size: number, videoCodec: string, audioCodec: string, hasVideo: boolean, hasAudio: boolean, width: number, height: number}>}
  */
 function probeVideo(inputPath) {
   return new Promise((resolve, reject) => {
     ffmpeg.ffprobe(inputPath, (err, metadata) => {
       if (err) return reject(err);
+      if (!metadata || typeof metadata !== 'object') {
+        return reject(new Error('Invalid media metadata.'));
+      }
 
       const format = metadata.format || {};
-      const videoStream = (metadata.streams || []).find(s => s.codec_type === 'video');
-      const audioStream = (metadata.streams || []).find(s => s.codec_type === 'audio');
+      const streams = Array.isArray(metadata.streams) ? metadata.streams : [];
+      const videoStream = streams.find(s => s.codec_type === 'video');
+      const audioStream = streams.find(s => s.codec_type === 'audio');
 
       // Comprehensive duration resolution: format -> video stream -> audio stream -> tag duration
       let duration = parseFloat(format.duration) || 0;
@@ -68,21 +157,46 @@ function probeVideo(inputPath) {
         }
       }
 
+      const width = videoStream ? (parseInt(videoStream.width, 10) || 0) : 0;
+      const height = videoStream ? (parseInt(videoStream.height, 10) || 0) : 0;
+
       resolve({
-        duration: duration || 0,
+        duration: Number.isFinite(duration) && duration > 0 ? duration : 0,
         size: parseInt(format.size, 10) || 0,
-        videoCodec: videoStream ? videoStream.codec_name : 'unknown',
-        audioCodec: audioStream ? audioStream.codec_name : 'none',
-        hasAudio: !!audioStream,
-        width: videoStream ? (parseInt(videoStream.width, 10) || 0) : 0,
-        height: videoStream ? (parseInt(videoStream.height, 10) || 0) : 0,
+        videoCodec: videoStream ? (videoStream.codec_name || 'unknown') : 'unknown',
+        audioCodec: audioStream ? (audioStream.codec_name || 'none') : 'none',
+        hasVideo: Boolean(videoStream && width > 0 && height > 0),
+        hasAudio: Boolean(audioStream),
+        width,
+        height,
       });
     });
   });
 }
 
 /**
+ * Verifies that an uploaded file is genuinely a valid video file via ffprobe inspection.
+ */
+async function validateVideoFile(filePath) {
+  const meta = await probeVideo(filePath);
+  if (!meta.hasVideo || meta.videoCodec === 'unknown') {
+    throw new Error('Uploaded file does not contain a valid video stream.');
+  }
+  return meta;
+}
+
+function removeFileQuietly(filePath) {
+  if (!filePath) return;
+  try {
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  } catch (_) {
+    // Best-effort cleanup
+  }
+}
+
+/**
  * Compress a video to a target file size using constrained single-pass VBV encoding.
+ * Strips all container metadata (GPS, EXIF, device tags, chapters) for full user privacy.
  *
  * @param {string} inputPath   - Path to the source video
  * @param {string} outputPath  - Path for the compressed output
@@ -92,8 +206,11 @@ function probeVideo(inputPath) {
  * @returns {Promise<{originalSize: number, compressedSize: number, duration: number}>}
  */
 async function compress(inputPath, outputPath, targetMB = 10, onProgress = () => {}, options = {}) {
-  // Enforce minimum target
-  targetMB = Math.max(parseInt(targetMB, 10) || 10, 10);
+  targetMB = Math.max(10, Math.min(2000, parseInt(targetMB, 10) || 10));
+  const timeoutMs = (typeof options.timeoutMs === 'number' && options.timeoutMs > 0)
+    ? options.timeoutMs
+    : DEFAULT_JOB_TIMEOUT_MS;
+  const signal = options.signal;
 
   const meta = await probeVideo(inputPath);
   const fullDuration = meta.duration;
@@ -123,39 +240,39 @@ async function compress(inputPath, outputPath, targetMB = 10, onProgress = () =>
   // --- Pre-trim step with guaranteed cleanup in try/finally ---
   let encodePath = inputPath;
   let duration = fullDuration;
-  const randomSuffix = crypto.randomBytes(4).toString('hex');
+  const randomSuffix = crypto.randomBytes(6).toString('hex');
   const trimmedPath = outputPath.replace(/\.[^.]+$/, '') + `_trimmed_${randomSuffix}.mkv`;
   let needsTrimCleanup = false;
+  let completedSuccessfully = false;
 
   try {
     if (isTrimming) {
-      console.log(`[Trim] Pre-trimming ${trimStart.toFixed(2)}s \u2192 ${trimEnd.toFixed(2)}s`);
       onProgress({ percent: 0, stage: 'trimming' });
 
-      await new Promise((resolve, reject) => {
-        ffmpeg(inputPath)
-          .inputOptions(['-ss', String(trimStart)])
-          .outputOptions(['-t', String(trimEnd - trimStart)])
-          .videoCodec('copy')
-          .audioCodec('copy')
-          .output(trimmedPath)
-          .on('start', () => console.log('[Trim] Stream-copy trim started...'))
-          .on('error', (err) => reject(new Error(`Trim failed: ${err.message}`)))
-          .on('end', resolve)
-          .run();
+      const trimCmd = ffmpeg(inputPath)
+        .inputOptions(['-ss', String(trimStart)])
+        .outputOptions([
+          '-t', String(trimEnd - trimStart),
+          '-map_metadata', '-1',
+          '-map_chapters', '-1',
+        ])
+        .videoCodec('copy')
+        .audioCodec('copy')
+        .output(trimmedPath);
+
+      needsTrimCleanup = true;
+      await runFfmpegCommand(trimCmd, { timeoutMs, signal }).catch((err) => {
+        throw new Error(`Trim failed: ${err.message}`);
       });
 
       // Re-probe trimmed file for actual keyframe-aligned duration
       const trimMeta = await probeVideo(trimmedPath);
       duration = trimMeta.duration || (trimEnd - trimStart);
       encodePath = trimmedPath;
-      needsTrimCleanup = true;
 
       if (!duration || duration <= 0) {
         throw new Error('Trimmed video has no valid duration.');
       }
-
-      console.log(`[Trim] Trimmed file duration: ${duration.toFixed(2)}s`);
     }
 
     // --- Speed factor (clamped between 0.5x and 2.0x for filter safety) ---
@@ -163,7 +280,7 @@ async function compress(inputPath, outputPath, targetMB = 10, onProgress = () =>
     if (typeof options.speed === 'number' && Number.isFinite(options.speed) && options.speed > 0) {
       speed = Math.max(0.5, Math.min(2.0, options.speed));
     }
-    duration = duration / speed; // Adjust duration for bitrate calculation
+    duration = duration / speed;
 
     // --- Format Check (MP3, GIF, MP4) ---
     const format = String(options.format || 'mp4').toLowerCase();
@@ -173,31 +290,42 @@ async function compress(inputPath, outputPath, targetMB = 10, onProgress = () =>
       if (!meta.hasAudio) {
         throw new Error('Cannot extract MP3 audio: the source video contains no audio stream.');
       }
-      console.log('[Format] Extracting MP3 audio...');
       onProgress({ percent: 10, stage: 'compressing' });
-      const mp3Bitrate = parseInt(options.audioBitrate, 10) || 192;
-      await new Promise((resolve, reject) => {
-        const cmd = ffmpeg(encodePath).noVideo().audioCodec('libmp3lame').audioBitrate(mp3Bitrate);
-        if (volume !== 1) {
-          cmd.audioFilter(`volume=${volume.toFixed(2)}`);
-        }
-        if (speed !== 1.0) {
-          cmd.audioFilter(`atempo=${speed.toFixed(2)}`);
-        }
-        cmd.output(outputPath)
-          .on('progress', p => onProgress({ percent: Math.min(10 + Math.round((p.percent || 0) * 0.85), 95), stage: 'compressing' }))
-          .on('error', err => reject(new Error(`MP3 extraction failed: ${err.message}`)))
-          .on('end', () => { onProgress({ percent: 100, stage: 'done' }); resolve(); })
-          .run();
+      const requestedMp3Bitrate = parseInt(options.audioBitrate, 10);
+      const mp3Bitrate = [64, 96, 128, 192, 256, 320].includes(requestedMp3Bitrate) ? requestedMp3Bitrate : 192;
+
+      const cmd = ffmpeg(encodePath)
+        .noVideo()
+        .audioCodec('libmp3lame')
+        .audioBitrate(mp3Bitrate)
+        .outputOptions(['-map_metadata', '-1', '-map_chapters', '-1']);
+
+      // Combine audio filters into a single -af chain so both volume & speed apply reliably
+      const mp3AudioFilters = [];
+      if (volume !== 1) mp3AudioFilters.push(`volume=${volume.toFixed(2)}`);
+      if (speed !== 1.0) mp3AudioFilters.push(`atempo=${speed.toFixed(2)}`);
+      if (mp3AudioFilters.length > 0) {
+        cmd.audioFilter(mp3AudioFilters.join(','));
+      }
+
+      cmd
+        .output(outputPath)
+        .on('progress', (p) => {
+          onProgress({ percent: Math.min(10 + Math.round((p.percent || 0) * 0.85), 95), stage: 'compressing' });
+        });
+
+      await runFfmpegCommand(cmd, { timeoutMs, signal }).catch((err) => {
+        throw new Error(`MP3 extraction failed: ${err.message}`);
       });
 
+      onProgress({ percent: 100, stage: 'done' });
       const compressedStats = fs.statSync(outputPath);
+      completedSuccessfully = true;
       return { originalSize: parseInt(meta.size, 10), compressedSize: compressedStats.size, duration };
     }
 
     // --- GIF Export ---
     if (format === 'gif') {
-      console.log('[Format] Generating animated GIF...');
       onProgress({ percent: 10, stage: 'compressing' });
       const vfFilters = [];
       if (speed !== 1.0) vfFilters.push(`setpts=${(1 / speed).toFixed(4)}*PTS`);
@@ -218,41 +346,41 @@ async function compress(inputPath, outputPath, targetMB = 10, onProgress = () =>
       }
       vfFilters.push(`fps=15,${scaleFilter},split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse`);
 
-      await new Promise((resolve, reject) => {
-        ffmpeg(encodePath)
-          .complexFilter(vfFilters.join(','))
-          .output(outputPath)
-          .on('progress', p => onProgress({ percent: Math.min(10 + Math.round((p.percent || 0) * 0.85), 95), stage: 'compressing' }))
-          .on('error', err => reject(new Error(`GIF generation failed: ${err.message}`)))
-          .on('end', () => { onProgress({ percent: 100, stage: 'done' }); resolve(); })
-          .run();
+      const cmd = ffmpeg(encodePath)
+        .complexFilter(vfFilters.join(','))
+        .outputOptions(['-map_metadata', '-1'])
+        .output(outputPath)
+        .on('progress', (p) => {
+          onProgress({ percent: Math.min(10 + Math.round((p.percent || 0) * 0.85), 95), stage: 'compressing' });
+        });
+
+      await runFfmpegCommand(cmd, { timeoutMs, signal }).catch((err) => {
+        throw new Error(`GIF generation failed: ${err.message}`);
       });
 
+      onProgress({ percent: 100, stage: 'done' });
       const compressedStats = fs.statSync(outputPath);
+      completedSuccessfully = true;
       return { originalSize: parseInt(meta.size, 10), compressedSize: compressedStats.size, duration };
     }
 
     // --- MP4 Video Compression Flow ---
-
-    // --- Audio Bitrate & Mute ---
-    const muteAudio = options.muteAudio === true || options.audioBitrate === 0 || !meta.hasAudio;
-    const audioBitrate = muteAudio ? 0 : (parseInt(options.audioBitrate, 10) || 128); // kbps
-
-    // 5% safety margin to ensure final output size stays strictly below target limit
-    const safetyFactor = 0.95;
-    const targetBytes = Math.floor(targetMB * 1024 * 1024 * safetyFactor);
-    const audioBitsTotal = audioBitrate * 1000 * duration;
-    const videoBitsTotal = (targetBytes * 8) - audioBitsTotal;
-
-    if (videoBitsTotal <= 0) {
-      throw new Error(
-        `Target size (${targetMB}MB) is too small for this video's duration (${Math.round(duration)}s). ` +
-        `Audio alone would require ~${Math.round(audioBitsTotal / 8 / 1024 / 1024)}MB. Try muting audio or trimming the clip.`
-      );
-    }
-
-    // Enforce reasonable minimum video bitrate (64 kbps)
-    const videoBitrate = Math.max(64, Math.floor(videoBitsTotal / duration / 1000)); // kbps
+    const {
+      muteAudio,
+      audioBitrate,
+      videoBitrate,
+      targetHeight,
+      targetFps,
+    } = calculateBitrateAndScaling({
+      duration,
+      targetMB,
+      audioBitrate: options.audioBitrate === 0 ? 0 : (parseInt(options.audioBitrate, 10) || 128),
+      muteAudio: options.muteAudio === true,
+      hasAudio: meta.hasAudio,
+      origHeight: meta.height || 0,
+      reqRes: options.resolution || 'auto',
+      reqFps: options.fps || 'auto',
+    });
 
     // --- Aspect Ratio Cropping with Even Dimension Guarantee ---
     const videoFilters = [];
@@ -270,45 +398,13 @@ async function compress(inputPath, outputPath, targetMB = 10, onProgress = () =>
       videoFilters.push(`setpts=${(1 / speed).toFixed(4)}*PTS`);
     }
 
-    // --- Smart Downscaling & Resolution (Enforce Even Heights) ---
-    let targetHeight = 0; // 0 = keep original
-    const origHeight = meta.height || 0;
-    const reqRes = String(options.resolution || 'auto').toLowerCase();
-
-    if (reqRes === 'auto') {
-      if (origHeight > 1080 && videoBitrate < 3500) {
-        targetHeight = 1080;
-      } else if (origHeight > 720 && videoBitrate < 1800) {
-        targetHeight = 720;
-      } else if (origHeight > 480 && videoBitrate < 750) {
-        targetHeight = 480;
-      } else if (origHeight > 360 && videoBitrate < 350) {
-        targetHeight = 360;
-      }
-    } else if (['1080', '720', '480', '360'].includes(reqRes)) {
-      const specifiedH = parseInt(reqRes, 10);
-      if (origHeight > specifiedH || origHeight === 0) {
-        targetHeight = specifiedH;
-      }
-    }
-
+    // --- Resolution Scaling ---
     if (targetHeight > 0) {
-      targetHeight = targetHeight - (targetHeight % 2); // Ensure strictly divisible by 2
       videoFilters.push(`scale=-2:${targetHeight}`);
-      console.log(`[Quality] Scaling resolution to ${targetHeight}p`);
     }
 
-    // Always ensure final output dimensions are even for libx264
+    // Always ensure final output dimensions are even for H.264 yuv420p
     videoFilters.push("pad='ceil(iw/2)*2':'ceil(ih/2)*2'");
-
-    // --- FPS Capping ---
-    let targetFps = 0; // 0 = keep original
-    const reqFps = String(options.fps || 'auto').toLowerCase();
-    if (reqFps === '30' || reqFps === '24') {
-      targetFps = parseInt(reqFps, 10);
-    } else if (reqFps === 'auto' && videoBitrate < 1000) {
-      targetFps = 30; // Auto-cap at 30fps for low bitrates to boost quality per frame
-    }
 
     // Encoding runner supporting CPU & Hardware Acceleration (NVENC, QSV, AMF)
     const runEncoding = (codec) => {
@@ -316,7 +412,10 @@ async function compress(inputPath, outputPath, targetMB = 10, onProgress = () =>
       const isQsv = codec.includes('qsv');
       const isAmf = codec.includes('amf');
 
+      // Strip all container metadata, EXIF, GPS tags, chapters, and encoder software tags for privacy
       const encodeOpts = [
+        '-map_metadata', '-1',
+        '-map_chapters', '-1',
         '-profile:v', 'high',
         '-pix_fmt', 'yuv420p',
         '-maxrate', `${Math.floor(videoBitrate * 1.15)}k`,
@@ -331,7 +430,7 @@ async function compress(inputPath, outputPath, targetMB = 10, onProgress = () =>
       } else if (isAmf) {
         encodeOpts.push('-quality', 'balanced');
       } else {
-        encodeOpts.push('-preset', 'slow', '-level', '4.1');
+        encodeOpts.push('-preset', 'medium', '-level', '4.1');
       }
 
       if (videoFilters.length > 0) {
@@ -341,45 +440,38 @@ async function compress(inputPath, outputPath, targetMB = 10, onProgress = () =>
         encodeOpts.push('-r', String(targetFps));
       }
 
-      return new Promise((resolve, reject) => {
-        const cmd = ffmpeg(encodePath)
-          .videoCodec(codec)
-          .videoBitrate(videoBitrate);
+      const cmd = ffmpeg(encodePath)
+        .videoCodec(codec)
+        .videoBitrate(videoBitrate);
 
-        if (muteAudio) {
-          cmd.addOption('-an');
-        } else {
-          cmd.audioCodec('aac').audioBitrate(audioBitrate);
-          const audioFilters = [];
-          if (volume !== 1 && meta.hasAudio) {
-            audioFilters.push(`volume=${volume.toFixed(2)}`);
-          }
-          if (speed !== 1.0 && meta.hasAudio) {
-            audioFilters.push(`atempo=${speed.toFixed(2)}`);
-          }
-          if (audioFilters.length > 0) {
-            cmd.audioFilter(audioFilters.join(','));
-          }
+      if (muteAudio) {
+        cmd.addOption('-an');
+      } else {
+        cmd.audioCodec('aac').audioBitrate(audioBitrate);
+        const audioFilters = [];
+        if (volume !== 1 && meta.hasAudio) {
+          audioFilters.push(`volume=${volume.toFixed(2)}`);
         }
+        if (speed !== 1.0 && meta.hasAudio) {
+          audioFilters.push(`atempo=${speed.toFixed(2)}`);
+        }
+        if (audioFilters.length > 0) {
+          cmd.audioFilter(audioFilters.join(','));
+        }
+      }
 
-        cmd
-          .addOptions(encodeOpts)
-          .output(outputPath)
-          .on('start', () => {
-            console.log(`[Encoding] Single-pass VBV encoding via ${codec} (target ${videoBitrate} kbps, maxrate ${Math.floor(videoBitrate * 1.15)} kbps)...`);
-            onProgress({ percent: 10, stage: 'compressing' });
-          })
-          .on('progress', (p) => {
-            const pct = Math.min(10 + Math.round((p.percent || 0) * 0.85), 95);
-            onProgress({ percent: pct, stage: 'compressing' });
-          })
-          .on('error', (err) => reject(err))
-          .on('end', () => {
-            onProgress({ percent: 100, stage: 'done' });
-            resolve();
-          });
-        cmd.run();
-      });
+      cmd
+        .addOptions(encodeOpts)
+        .output(outputPath)
+        .on('start', () => {
+          onProgress({ percent: 10, stage: 'compressing' });
+        })
+        .on('progress', (p) => {
+          const pct = Math.min(10 + Math.round((p.percent || 0) * 0.85), 95);
+          onProgress({ percent: pct, stage: 'compressing' });
+        });
+
+      return runFfmpegCommand(cmd, { timeoutMs, signal });
     };
 
     // Determine target codec from requested options with graceful fallback
@@ -392,33 +484,39 @@ async function compress(inputPath, outputPath, targetMB = 10, onProgress = () =>
     try {
       await runEncoding(targetCodec);
     } catch (err) {
-      if (targetCodec !== 'libx264') {
-        console.warn(`[Hardware Acceleration] ${targetCodec} unavailable (${err.message}). Gracefully falling back to CPU libx264...`);
-        if (fs.existsSync(outputPath)) {
-          try { fs.unlinkSync(outputPath); } catch (_) {}
-        }
+      if (targetCodec !== 'libx264' && !(signal && signal.aborted)) {
+        removeFileQuietly(outputPath);
         await runEncoding('libx264');
       } else {
         throw new Error(`Compression failed: ${err.message}`);
       }
     }
 
+    onProgress({ percent: 100, stage: 'done' });
     const compressedStats = fs.statSync(outputPath);
+    completedSuccessfully = true;
 
     return {
       originalSize: parseInt(meta.size, 10),
       compressedSize: compressedStats.size,
-      duration: duration,
+      duration,
     };
   } finally {
     // Guaranteed cleanup of intermediate trimmed files, even on failure
-    if (needsTrimCleanup && trimmedPath && fs.existsSync(trimmedPath)) {
-      try {
-        fs.unlinkSync(trimmedPath);
-        console.log(`[Trim] Cleaned up temporary trimmed file: ${path.basename(trimmedPath)}`);
-      } catch (_) { /* best effort */ }
+    if (needsTrimCleanup) {
+      removeFileQuietly(trimmedPath);
+    }
+    // Remove partial/corrupt output file if compression failed or was aborted
+    if (!completedSuccessfully) {
+      removeFileQuietly(outputPath);
     }
   }
 }
 
-module.exports = { compress, probeVideo, getHardwareEncoders };
+module.exports = {
+  compress,
+  probeVideo,
+  validateVideoFile,
+  getHardwareEncoders,
+  killActiveJobs,
+};

@@ -115,25 +115,37 @@ function parseArgs(args) {
     } else if ((arg === '-o' || arg === '--output') && next) {
       options.output = next; i++;
     } else if ((arg === '-t' || arg === '--target') && next) {
-      options.target = Math.max(10, parseInt(next, 10) || 10); i++;
+      const parsed = parseInt(next, 10);
+      options.target = Number.isFinite(parsed) ? Math.max(10, Math.min(2000, parsed)) : 10;
+      i++;
     } else if ((arg === '-f' || arg === '--format') && next) {
       options.format = next.toLowerCase(); i++;
     } else if ((arg === '-s' || arg === '--trim-start') && next) {
-      options.trimStart = parseFloat(next); i++;
+      const parsed = parseFloat(next);
+      if (Number.isFinite(parsed) && parsed >= 0) options.trimStart = parsed;
+      i++;
     } else if ((arg === '-e' || arg === '--trim-end') && next) {
-      options.trimEnd = parseFloat(next); i++;
+      const parsed = parseFloat(next);
+      if (Number.isFinite(parsed) && parsed > 0) options.trimEnd = parsed;
+      i++;
     } else if ((arg === '-r' || arg === '--resolution') && next) {
       options.resolution = next.toLowerCase(); i++;
     } else if (arg === '--fps' && next) {
       options.fps = next.toLowerCase(); i++;
     } else if (arg === '--speed' && next) {
-      options.speed = parseFloat(next); i++;
+      const parsed = parseFloat(next);
+      if (Number.isFinite(parsed) && parsed > 0) options.speed = Math.max(0.5, Math.min(2.0, parsed));
+      i++;
     } else if (arg === '--volume' && next) {
-      options.volume = parseFloat(next); i++;
+      const parsed = parseFloat(next);
+      if (Number.isFinite(parsed)) options.volume = Math.max(0, Math.min(2.0, parsed));
+      i++;
     } else if (arg === '--mute') {
       options.muteAudio = true;
     } else if ((arg === '-a' || arg === '--audio-bitrate') && next) {
-      options.audioBitrate = parseInt(next, 10) || 128; i++;
+      const parsed = parseInt(next, 10);
+      options.audioBitrate = [64, 96, 128, 192, 256, 320].includes(parsed) ? parsed : 128;
+      i++;
     } else if (arg === '--aspect-ratio' && next) {
       options.aspectRatio = next.toLowerCase(); i++;
     } else if (arg === '--encoder' && next) {

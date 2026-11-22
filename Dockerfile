@@ -1,4 +1,4 @@
-# 10mb.video — Production Dockerfile
+# 10mb.video — Production Dockerfile (Hardened Non-Root Container)
 FROM node:20-alpine
 
 # Install system ffmpeg for universal cross-platform compatibility
@@ -18,8 +18,10 @@ COPY server/ ./server/
 COPY web/ ./web/
 COPY cli/ ./cli/
 
-# Create required persistent storage and scratch directories
-RUN mkdir -p tmp storage/clips
+# Create required storage and scratch directories owned by non-root node user
+RUN mkdir -p tmp storage/clips && chown -R node:node /app
+
+USER node
 
 # Expose HTTP port
 EXPOSE 3000

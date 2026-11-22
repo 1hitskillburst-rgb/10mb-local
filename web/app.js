@@ -1,5 +1,5 @@
 // ==========================================================================
-// 10mb.video — Application Controller (Unified SPA)
+// 10mb.video — Application Controller (Private, Leak-Free Unified SPA)
 // ==========================================================================
 
 (() => {
@@ -10,7 +10,10 @@
   let selectedFile = null;
   let uploadedFileId = null;
   let eventSource = null;
+  let activeBatchEventSource = null;
+  let activeUploadXhr = null;
   let videoObjectUrl = null;
+  let outputObjectUrl = null;
   let videoDuration = 0;
   let trimStartRatio = 0;    // 0 to 1
   let trimEndRatio = 1;      // 0 to 1
@@ -23,15 +26,17 @@
   let selectedFormat = 'mp4';
   let clips = [];
   let activeClip = null;
+  let searchDebounceTimer = null;
+  let confirmResolver = null;
 
   // ---- DOM Elements ----
-  // Navigation & Views
   const views = ['home', 'studio', 'batch', 'clips'];
   const navLinks = document.querySelectorAll('.links button');
   const navClipBadge = document.getElementById('navClipBadge');
   const navBatchBadge = document.getElementById('navBatchBadge');
   const homeClipCount = document.getElementById('homeClipCount');
   const themeToggle = document.getElementById('themeToggle');
+  const purgePrivacyBtn = document.getElementById('purgePrivacyBtn');
 
   // Home Page
   const dropZone = document.getElementById('dropZone');
@@ -60,6 +65,7 @@
   // Studio Settings & Actions
   const fileName = document.getElementById('fileName');
   const fileSize = document.getElementById('fileSize');
+  const changeFileBtn = document.getElementById('changeFileBtn');
   const fmtBtns = document.querySelectorAll('#fmt button');
   const qualityEst = document.getElementById('qualityEst');
   const szEl = document.getElementById('sz');
@@ -68,7 +74,6 @@
   const presetChips = document.querySelectorAll('#chips .chip');
   const resolutionSelect = document.getElementById('resolutionSelect');
   const encoderSelect = document.getElementById('encoderSelect');
-  const engineSelect = document.getElementById('engineSelect');
   const fpsSelect = document.getElementById('fpsSelect');
   const speedSelect = document.getElementById('speedSelect');
   const aspectSelect = document.getElementById('aspectSelect');
@@ -86,6 +91,7 @@
   const compressionRatio = document.getElementById('compressionRatio');
   const downloadBtn = document.getElementById('downloadBtn');
   const saveClipBtn = document.getElementById('saveClipBtn');
+  const saveClipDefaultHTML = saveClipBtn ? saveClipBtn.innerHTML : '';
   const openCompareBtn = document.getElementById('openCompareBtn');
 
   // Comparison Modal
@@ -96,8 +102,19 @@
   const comparePlayBtn = document.getElementById('comparePlayBtn');
   const comparePlayText = document.getElementById('comparePlayText');
 
+  // Confirmation Modal
+  const confirmModal = document.getElementById('confirmModal');
+  const confirmModalTitle = document.getElementById('confirmModalTitle');
+  const confirmModalMessage = document.getElementById('confirmModalMessage');
+  const confirmCancelBtn = document.getElementById('confirmCancelBtn');
+  const confirmCancelX = document.getElementById('confirmCancelX');
+  const confirmAcceptBtn = document.getElementById('confirmAcceptBtn');
+
   // Clips Page
   const ytVideo = document.getElementById('ytVideo');
+  const ytGifPreview = document.getElementById('ytGifPreview');
+  const ytAudioPlaceholder = document.getElementById('ytAudioPlaceholder');
+  const ytAudio = document.getElementById('ytAudio');
   const activeClipTitle = document.getElementById('activeClipTitle');
   const activeClipMeta = document.getElementById('activeClipMeta');
   const activeClipDownloadBtn = document.getElementById('activeClipDownloadBtn');
@@ -120,6 +137,105 @@
   const toastEl = document.getElementById('toast');
 
   // ==========================================
+  //  SECURITY & MEMORY CLEANUP HELPERS
+  // ==========================================
+
+  function isSafeMediaUrl(url) {
+    if (typeof url !== 'string' || !url) return false;
+    return url.startsWith('/api/') || url.startsWith('/tmp/') || url.startsWith('blob:');
+  }
+
+  function revokeUrl(url) {
+    if (url && typeof url === 'string' && url.startsWith('blob:')) {
+      try { URL.revokeObjectURL(url); } catch (_) {}
+    }
+  }
+
+  function releaseVideoElement(videoEl) {
+    if (!videoEl) return;
+    try {
+      videoEl.pause();
+      videoEl.removeAttribute('src');
+      videoEl.load();
+    } catch (_) {}
+  }
+
+  function closeActiveEventSource() {
+    if (eventSource) {
+      try { eventSource.close(); } catch (_) {}
+      eventSource = null;
+    }
+  }
+
+  function apiHeaders(extra = {}) {
+    return {
+      'X-Requested-With': '10mb-client',
+      ...extra,
+    };
+  }
+
+  function resetSaveClipButton() {
+    if (!saveClipBtn) return;
+    saveClipBtn.disabled = false;
+    saveClipBtn.innerHTML = saveClipDefaultHTML;
+  }
+
+  // Clean up all ObjectURLs, SSE streams, and XHRs when leaving page
+  window.addEventListener('pagehide', () => {
+    stopPreviewLoop();
+    closeActiveEventSource();
+    if (activeBatchEventSource) {
+      try { activeBatchEventSource.close(); } catch (_) {}
+      activeBatchEventSource = null;
+    }
+    if (activeUploadXhr) {
+      try { activeUploadXhr.abort(); } catch (_) {}
+      activeUploadXhr = null;
+    }
+    revokeUrl(videoObjectUrl);
+    videoObjectUrl = null;
+    revokeUrl(outputObjectUrl);
+    outputObjectUrl = null;
+  });
+
+  // ==========================================
+  //  IN-APP CONFIRMATION MODAL (NO window.confirm)
+  // ==========================================
+
+  function closeConfirmModal(accepted) {
+    if (!confirmModal) return;
+    confirmModal.classList.remove('visible');
+    document.body.style.overflow = '';
+    const resolve = confirmResolver;
+    confirmResolver = null;
+    if (resolve) resolve(Boolean(accepted));
+  }
+
+  function openConfirmModal({ title = 'Confirm action', message = '', confirmLabel = 'Confirm', danger = false }) {
+    if (!confirmModal) return Promise.resolve(false);
+    confirmModalTitle.textContent = title;
+    confirmModalMessage.textContent = message;
+    confirmAcceptBtn.textContent = confirmLabel;
+    confirmAcceptBtn.className = danger ? 'btn btn-danger-solid' : 'btn';
+    confirmModal.classList.add('visible');
+    document.body.style.overflow = 'hidden';
+    confirmAcceptBtn.focus();
+
+    return new Promise((resolve) => {
+      confirmResolver = resolve;
+    });
+  }
+
+  if (confirmCancelBtn) confirmCancelBtn.addEventListener('click', () => closeConfirmModal(false));
+  if (confirmCancelX) confirmCancelX.addEventListener('click', () => closeConfirmModal(false));
+  if (confirmAcceptBtn) confirmAcceptBtn.addEventListener('click', () => closeConfirmModal(true));
+  if (confirmModal) {
+    confirmModal.addEventListener('click', (e) => {
+      if (e.target === confirmModal) closeConfirmModal(false);
+    });
+  }
+
+  // ==========================================
   //  ROUTING & VIEW MANAGEMENT
   // ==========================================
 
@@ -127,13 +243,11 @@
     if (!views.includes(viewName)) viewName = 'home';
     currentView = viewName;
 
-    // Toggle view sections
     views.forEach(v => {
       const el = document.getElementById(v);
       if (el) el.classList.toggle('on', v === viewName);
     });
 
-    // Update nav links aria-current
     navLinks.forEach(b => {
       if (b.dataset.go === viewName) {
         b.setAttribute('aria-current', 'page');
@@ -142,23 +256,33 @@
       }
     });
 
-    // Pause studio video when navigating away
-    if (viewName !== 'studio' && videoPreview && !videoPreview.paused) {
-      videoPreview.pause();
+    if (viewName !== 'studio') {
+      if (videoPreview && !videoPreview.paused) {
+        videoPreview.pause();
+      }
       isPlayingPreview = false;
+      stopPreviewLoop();
       updatePlayPauseIcon();
     }
 
-    // Refresh clips if entering clips page
-    if (viewName === 'clips') {
-      loadClips();
+    if (viewName !== 'clips') {
+      if (ytVideo && !ytVideo.paused) ytVideo.pause();
+      if (ytAudio && !ytAudio.paused) ytAudio.pause();
     }
 
-    window.location.hash = viewName;
+    if (viewName === 'clips') {
+      loadClips();
+    } else if (viewName === 'batch') {
+      updateBatchBadges();
+      renderBatchList();
+    }
+
+    if (window.location.hash !== `#${viewName}`) {
+      window.location.hash = viewName;
+    }
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
-  // Handle all [data-go] click triggers
   document.querySelectorAll('[data-go]').forEach(b => {
     b.addEventListener('click', (e) => {
       e.preventDefault();
@@ -166,10 +290,9 @@
     });
   });
 
-  // Handle URL hash on initial load & popstate
-  window.addEventListener('popstate', () => {
+  window.addEventListener('hashchange', () => {
     const hash = window.location.hash.replace('#', '');
-    if (views.includes(hash)) {
+    if (views.includes(hash) && hash !== currentView) {
       go(hash);
     }
   });
@@ -179,8 +302,9 @@
   // ==========================================
 
   function applyTheme(theme) {
-    document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('10mb_theme', theme);
+    const safeTheme = theme === 'dark' ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', safeTheme);
+    try { localStorage.setItem('10mb_theme', safeTheme); } catch (_) {}
   }
 
   if (themeToggle) {
@@ -191,20 +315,22 @@
     });
   }
 
-  const savedTheme = localStorage.getItem('10mb_theme');
-  if (savedTheme) {
-    applyTheme(savedTheme);
-  }
+  try {
+    const savedTheme = localStorage.getItem('10mb_theme');
+    if (savedTheme === 'dark' || savedTheme === 'light') {
+      applyTheme(savedTheme);
+    }
+  } catch (_) {}
 
   // ==========================================
   //  FORMAT UTILITIES & TOAST
   // ==========================================
 
   function formatBytes(bytes) {
-    if (!bytes || bytes === 0) return '0 MB';
+    if (!bytes || bytes <= 0) return '0 MB';
     const k = 1024;
     const units = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(k)));
     const val = bytes / Math.pow(k, i);
     return `${val.toFixed(i >= 2 ? 2 : 0)} ${units[i]}`;
   }
@@ -215,17 +341,6 @@
     const m = Math.floor(s / 60);
     const sec = s % 60;
     return `${m}:${String(sec).padStart(2, '0')}`;
-  }
-
-  function escapeHTML(str) {
-    if (!str) return '';
-    return String(str).replace(/[&<>'"]/g, tag => ({
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      "'": '&#39;',
-      '"': '&quot;'
-    }[tag] || tag));
   }
 
   function showToast(message, type = 'normal') {
@@ -243,8 +358,9 @@
   // ==========================================
 
   if (ringSvg) {
+    const NS = 'http://www.w3.org/2000/svg';
     const N = 64;
-    let svgContent = '';
+    const frag = document.createDocumentFragment();
     for (let i = 0; i < N; i++) {
       const t = i / N;
       const r = Math.round(242 - (242 - 140) * t);
@@ -252,9 +368,38 @@
       const b = Math.round(44 + (120 - 44) * t);
       const angle = (i * 180 / N).toFixed(1);
       const tx = (Math.sin(t * Math.PI * 2) * 6).toFixed(1);
-      svgContent += `<ellipse rx="78" ry="28" fill="none" stroke="rgb(${r},${g},${b})" stroke-width="0.75" transform="rotate(${angle}) translate(${tx} 0)"/>`;
+      const ellipse = document.createElementNS(NS, 'ellipse');
+      ellipse.setAttribute('rx', '78');
+      ellipse.setAttribute('ry', '28');
+      ellipse.setAttribute('fill', 'none');
+      ellipse.setAttribute('stroke', `rgb(${r},${g},${b})`);
+      ellipse.setAttribute('stroke-width', '0.75');
+      ellipse.setAttribute('transform', `rotate(${angle}) translate(${tx} 0)`);
+      frag.appendChild(ellipse);
     }
-    ringSvg.innerHTML = svgContent;
+    ringSvg.replaceChildren(frag);
+  }
+
+  // ==========================================
+  //  HARDWARE ENCODER AVAILABILITY DETECTION
+  // ==========================================
+
+  async function detectEncoders() {
+    if (!encoderSelect) return;
+    try {
+      const res = await fetch('/api/encoders');
+      if (!res.ok) return;
+      const enc = await res.json();
+      const map = { nvenc: enc.nvenc, qsv: enc.qsv, amf: enc.amf };
+      Array.from(encoderSelect.options).forEach(opt => {
+        if (Object.prototype.hasOwnProperty.call(map, opt.value) && !map[opt.value]) {
+          opt.disabled = true;
+          if (!opt.textContent.includes('unavailable')) {
+            opt.textContent = `${opt.textContent} (unavailable)`;
+          }
+        }
+      });
+    } catch (_) {}
   }
 
   // ==========================================
@@ -264,8 +409,42 @@
   function isVideoFile(file) {
     if (!file) return false;
     if (file.type && file.type.startsWith('video/')) return true;
-    const ext = file.name.split('.').pop().toLowerCase();
-    return ['mp4', 'mov', 'avi', 'mkv', 'webm', 'flv', 'wmv', 'm4v', 'ts'].includes(ext);
+    const ext = (file.name || '').split('.').pop().toLowerCase();
+    return ['mp4', 'mov', 'avi', 'mkv', 'webm', 'flv', 'wmv', 'm4v', 'ts', 'mpg', 'mpeg'].includes(ext);
+  }
+
+  function resetStudioEmptyState() {
+    selectedFile = null;
+    uploadedFileId = null;
+    videoDuration = 0;
+    trimStartRatio = 0;
+    trimEndRatio = 1;
+    isPlayingPreview = false;
+    stopPreviewLoop();
+    closeActiveEventSource();
+
+    revokeUrl(videoObjectUrl);
+    videoObjectUrl = null;
+    revokeUrl(outputObjectUrl);
+    outputObjectUrl = null;
+
+    releaseVideoElement(videoPreview);
+    releaseVideoElement(compareOriginal);
+    releaseVideoElement(compareOutput);
+
+    if (fileName) fileName.textContent = 'No video selected';
+    if (fileSize) fileSize.textContent = 'Pick a video from Upload to begin';
+    if (changeFileBtn) changeFileBtn.textContent = 'Choose file';
+    if (studioDuration) studioDuration.textContent = 'Length 0:00';
+    if (trimStartTime) trimStartTime.textContent = '0:00';
+    if (trimCurrentTime) trimCurrentTime.textContent = '0:00';
+    if (trimEndTime) trimEndTime.textContent = '0:00';
+    if (qualityEst) qualityEst.textContent = 'Select a video to estimate bitrate';
+    if (progressCard) progressCard.classList.remove('visible');
+    if (resultCard) resultCard.classList.remove('visible');
+    if (compressBtn) compressBtn.disabled = true;
+    resetSaveClipButton();
+    updatePlayPauseIcon();
   }
 
   function handleVideoFile(file) {
@@ -275,42 +454,44 @@
       return;
     }
 
+    closeActiveEventSource();
     selectedFile = file;
     uploadedFileId = null;
 
     fileName.textContent = file.name;
     fileSize.textContent = formatBytes(file.size);
+    if (changeFileBtn) changeFileBtn.textContent = 'Change file';
 
-    if (videoObjectUrl) {
-      URL.revokeObjectURL(videoObjectUrl);
-    }
+    revokeUrl(videoObjectUrl);
+    revokeUrl(outputObjectUrl);
+    outputObjectUrl = null;
     videoObjectUrl = URL.createObjectURL(file);
+
     videoPreview.src = videoObjectUrl;
-    compareOriginal.src = videoObjectUrl;
+    if (compareOriginal) compareOriginal.src = videoObjectUrl;
+    releaseVideoElement(compareOutput);
 
-    videoPreview.addEventListener('loadedmetadata', onVideoMetadataLoaded, { once: true });
-
-    // Reset trim and volume state
     trimStartRatio = 0;
     trimEndRatio = 1;
     isPlayingPreview = false;
+    stopPreviewLoop();
     updatePlayPauseIcon();
 
     outputVolume = 100;
     isMuted = false;
     updateVolumeUI();
 
-    // Reset progress and results
     progressCard.classList.remove('visible');
     resultCard.classList.remove('visible');
+    resetSaveClipButton();
     compressBtn.disabled = false;
 
-    // Navigate to studio
     go('studio');
   }
 
   function onVideoMetadataLoaded() {
-    videoDuration = videoPreview.duration || 0;
+    if (!selectedFile) return;
+    videoDuration = Number.isFinite(videoPreview.duration) ? videoPreview.duration : 0;
     studioDuration.textContent = `Length ${formatTime(videoDuration)}`;
 
     trimStartRatio = 0;
@@ -321,12 +502,16 @@
 
     videoPreview.currentTime = 0;
 
-    // Allow user to set target up to 100MB or higher (defaulting to 10MB)
     const fileMB = Math.ceil(selectedFile.size / (1024 * 1024));
     const sliderMax = Math.min(500, Math.max(100, fileMB));
-    slider.max = sliderMax;
+    slider.max = String(sliderMax);
 
     setTargetSize(10);
+  }
+
+  // Register loadedmetadata ONCE to prevent listener accumulation
+  if (videoPreview) {
+    videoPreview.addEventListener('loadedmetadata', onVideoMetadataLoaded);
   }
 
   if (chooseFileBtn && fileInput) {
@@ -338,6 +523,12 @@
 
   if (dropZone && fileInput) {
     dropZone.addEventListener('click', () => fileInput.click());
+    dropZone.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        fileInput.click();
+      }
+    });
     dropZone.addEventListener('dragover', (e) => {
       e.preventDefault();
       dropZone.classList.add('dragover');
@@ -369,7 +560,6 @@
     });
   }
 
-  // Global window drop prevention
   window.addEventListener('dragover', (e) => e.preventDefault());
   window.addEventListener('drop', (e) => e.preventDefault());
 
@@ -395,6 +585,8 @@
 
     trimHandleStart.style.left = `${startPct}%`;
     trimHandleEnd.style.left = `${endPct}%`;
+    trimHandleStart.setAttribute('aria-valuenow', String(Math.round(startPct)));
+    trimHandleEnd.setAttribute('aria-valuenow', String(Math.round(endPct)));
 
     trimSelected.style.left = `${startPct}%`;
     trimSelected.style.width = `${endPct - startPct}%`;
@@ -408,13 +600,13 @@
 
   function updatePlayheadUI() {
     if (!videoDuration) return;
-    const currentRatio = videoPreview.currentTime / videoDuration;
+    const currentRatio = Math.max(0, Math.min(1, videoPreview.currentTime / videoDuration));
     trimPlayhead.style.left = `${currentRatio * 100}%`;
     trimCurrentTime.textContent = formatTime(videoPreview.currentTime);
   }
 
   function startPreviewLoop() {
-    cancelAnimationFrame(previewRafId);
+    stopPreviewLoop();
     function tick() {
       updatePlayheadUI();
       const endSec = getTrimEndSeconds();
@@ -424,23 +616,30 @@
       }
       if (!videoPreview.paused) {
         previewRafId = requestAnimationFrame(tick);
+      } else {
+        previewRafId = null;
       }
     }
     previewRafId = requestAnimationFrame(tick);
   }
 
   function stopPreviewLoop() {
-    cancelAnimationFrame(previewRafId);
+    if (previewRafId !== null) {
+      cancelAnimationFrame(previewRafId);
+      previewRafId = null;
+    }
   }
 
   function updatePlayPauseIcon() {
     if (!playIcon || !playBtn) return;
-    if (videoPreview.paused) {
+    if (!videoPreview || videoPreview.paused) {
       playIcon.innerHTML = '<path d="M7 4l13 8-13 8z"/>';
       playBtn.classList.remove('hidden');
+      playBtn.setAttribute('aria-label', 'Play preview');
     } else {
       playIcon.innerHTML = '<rect x="6" y="5" width="4" height="14" rx="1" fill="#f2552c"/><rect x="14" y="5" width="4" height="14" rx="1" fill="#f2552c"/>';
       playBtn.classList.add('hidden');
+      playBtn.setAttribute('aria-label', 'Pause preview');
     }
   }
 
@@ -477,9 +676,9 @@
     });
   }
 
-  // Trim handle dragging logic
   function getTrimBarRatio(clientX) {
     const rect = trimBar.getBoundingClientRect();
+    if (!rect.width) return 0;
     return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
   }
 
@@ -501,12 +700,10 @@
     const MIN_GAP = 0.01;
 
     if (isDraggingTrim === 'start') {
-      trimStartRatio = Math.min(ratio, trimEndRatio - MIN_GAP);
-      trimStartRatio = Math.max(0, trimStartRatio);
+      trimStartRatio = Math.max(0, Math.min(ratio, trimEndRatio - MIN_GAP));
       videoPreview.currentTime = getTrimStartSeconds();
     } else {
-      trimEndRatio = Math.max(ratio, trimStartRatio + MIN_GAP);
-      trimEndRatio = Math.min(1, trimEndRatio);
+      trimEndRatio = Math.min(1, Math.max(ratio, trimStartRatio + MIN_GAP));
       videoPreview.currentTime = getTrimEndSeconds();
     }
 
@@ -520,11 +717,42 @@
     document.body.style.cursor = '';
   }
 
+  function handleTrimKeyboard(type, e) {
+    if (!videoDuration) return;
+    const step = e.shiftKey ? 0.05 : 0.01;
+    const MIN_GAP = 0.01;
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      if (type === 'start') {
+        trimStartRatio = Math.max(0, trimStartRatio - step);
+        videoPreview.currentTime = getTrimStartSeconds();
+      } else {
+        trimEndRatio = Math.max(trimStartRatio + MIN_GAP, trimEndRatio - step);
+        videoPreview.currentTime = getTrimEndSeconds();
+      }
+      updateTrimUI();
+      updatePlayheadUI();
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      if (type === 'start') {
+        trimStartRatio = Math.min(trimEndRatio - MIN_GAP, trimStartRatio + step);
+        videoPreview.currentTime = getTrimStartSeconds();
+      } else {
+        trimEndRatio = Math.min(1, trimEndRatio + step);
+        videoPreview.currentTime = getTrimEndSeconds();
+      }
+      updateTrimUI();
+      updatePlayheadUI();
+    }
+  }
+
   if (trimHandleStart && trimHandleEnd && trimBar) {
     trimHandleStart.addEventListener('mousedown', (e) => onTrimDragStart('start', e));
     trimHandleEnd.addEventListener('mousedown', (e) => onTrimDragStart('end', e));
     trimHandleStart.addEventListener('touchstart', (e) => onTrimDragStart('start', e), { passive: false });
     trimHandleEnd.addEventListener('touchstart', (e) => onTrimDragStart('end', e), { passive: false });
+    trimHandleStart.addEventListener('keydown', (e) => handleTrimKeyboard('start', e));
+    trimHandleEnd.addEventListener('keydown', (e) => handleTrimKeyboard('end', e));
 
     document.addEventListener('mousemove', (e) => {
       if (isDraggingTrim) onTrimDragMove(e.clientX);
@@ -536,9 +764,8 @@
     document.addEventListener('mouseup', onTrimDragEnd);
     document.addEventListener('touchend', onTrimDragEnd);
 
-    // Click to seek scrubber
     trimBar.addEventListener('click', (e) => {
-      if (isDraggingTrim || e.target.closest('.trim-handle')) return;
+      if (!videoDuration || isDraggingTrim || e.target.closest('.trim-handle')) return;
       const ratio = getTrimBarRatio(e.clientX);
       const clamped = Math.max(trimStartRatio, Math.min(trimEndRatio, ratio));
       videoPreview.currentTime = clamped * videoDuration;
@@ -556,18 +783,14 @@
   function updateVolumeUI() {
     if (!volumeLabel || !volumeSlider || !audioIcon) return;
     volumeLabel.textContent = `${outputVolume}%`;
-    volumeSlider.value = outputVolume;
+    volumeSlider.value = String(outputVolume);
 
     if (videoPreview) {
       videoPreview.volume = Math.min(outputVolume / 100, 1);
       videoPreview.muted = isMuted || outputVolume === 0;
     }
 
-    if (isMuted || outputVolume === 0) {
-      audioIcon.innerHTML = VOL_ICON_MUTE;
-    } else {
-      audioIcon.innerHTML = VOL_ICON_HIGH;
-    }
+    audioIcon.innerHTML = (isMuted || outputVolume === 0) ? VOL_ICON_MUTE : VOL_ICON_HIGH;
   }
 
   if (volumeSlider) {
@@ -597,6 +820,10 @@
 
   function updateQualityEstimate() {
     if (!qualityEst) return;
+    if (!selectedFile) {
+      qualityEst.textContent = 'Select a video to estimate bitrate';
+      return;
+    }
     const duration = getTrimDuration() || videoDuration || 5;
     const targetMB = parseInt(slider.value, 10) || 10;
     const speed = parseFloat(speedSelect.value) || 1.0;
@@ -605,7 +832,12 @@
     const totalBits = targetMB * 1024 * 1024 * 8 * 0.95;
     const kbps = Math.floor(totalBits / effectiveSec / 1000);
 
-    if (kbps >= 2500) {
+    if (selectedFormat === 'mp3') {
+      const aRate = audioSelect.value === 'mute' ? 128 : (parseInt(audioSelect.value, 10) || 128);
+      qualityEst.textContent = `MP3 audio extraction (${aRate} kbps)`;
+    } else if (selectedFormat === 'gif') {
+      qualityEst.textContent = 'Animated GIF (15 fps optimized palette)';
+    } else if (kbps >= 2500) {
       qualityEst.textContent = `Excellent quality (~${(kbps / 1000).toFixed(1)} Mbps)`;
     } else if (kbps >= 1200) {
       qualityEst.textContent = `Great quality (~${(kbps / 1000).toFixed(1)} Mbps)`;
@@ -617,10 +849,10 @@
   }
 
   function setTargetSize(mb) {
-    const clamped = Math.max(10, parseInt(mb, 10) || 10);
-    slider.value = clamped;
-    szEl.textContent = clamped;
-    sz2El.textContent = clamped;
+    const clamped = Math.max(10, Math.min(2000, parseInt(mb, 10) || 10));
+    slider.value = String(clamped);
+    szEl.textContent = String(clamped);
+    sz2El.textContent = String(clamped);
 
     presetChips.forEach(chip => {
       chip.classList.toggle('on', parseInt(chip.dataset.v, 10) === clamped);
@@ -637,11 +869,14 @@
     chip.addEventListener('click', () => setTargetSize(chip.dataset.v));
   });
 
-  // Format Selection
   fmtBtns.forEach(btn => {
     btn.addEventListener('click', () => {
-      fmtBtns.forEach(b => b.classList.remove('on'));
+      fmtBtns.forEach(b => {
+        b.classList.remove('on');
+        b.setAttribute('aria-pressed', 'false');
+      });
       btn.classList.add('on');
+      btn.setAttribute('aria-pressed', 'true');
       selectedFormat = btn.dataset.format || 'mp4';
 
       if (selectedFormat === 'mp3') {
@@ -666,6 +901,7 @@
   });
 
   if (speedSelect) speedSelect.addEventListener('change', updateQualityEstimate);
+  if (audioSelect) audioSelect.addEventListener('change', updateQualityEstimate);
 
   // ==========================================
   //  COMPRESSION WORKFLOW
@@ -676,127 +912,6 @@
     progressBar.style.width = `${clamped}%`;
     progressPercent.textContent = `${Math.round(clamped)}%`;
     if (statusText) progressStatus.textContent = statusText;
-  }
-
-  // ==========================================
-  //  CLIENT-SIDE WEBASSEMBLY COMPRESSION (WASM)
-  // ==========================================
-  let wasmFFmpeg = null;
-
-  async function loadWasmFFmpeg() {
-    if (wasmFFmpeg) return wasmFFmpeg;
-
-    if (!window.FFmpeg) {
-      setProgress(5, 'Loading WebAssembly FFmpeg module from CDN...');
-      await new Promise((resolve, reject) => {
-        const script = document.createElement('script');
-        script.src = 'https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js';
-        script.onload = resolve;
-        script.onerror = () => reject(new Error('Failed to load WebAssembly FFmpeg script from CDN. Check your internet connection.'));
-        document.head.appendChild(script);
-      });
-    }
-
-    const { createFFmpeg } = window.FFmpeg;
-    wasmFFmpeg = createFFmpeg({
-      log: false,
-      corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
-    });
-
-    setProgress(15, 'Initializing WebAssembly core...');
-    await wasmFFmpeg.load();
-    return wasmFFmpeg;
-  }
-
-  async function startWasmCompression() {
-    compressBtn.disabled = true;
-    resultCard.classList.remove('visible');
-    progressCard.classList.add('visible');
-    setProgress(0, 'Preparing client-side encode (zero server uploads)...');
-
-    try {
-      const ffmpeg = await loadWasmFFmpeg();
-      const targetMB = parseInt(slider.value, 10) || 10;
-      const duration = getTrimDuration() || videoDuration || 10;
-      const speed = parseFloat(speedSelect.value) || 1.0;
-      const effectiveSec = duration / speed;
-      const totalBits = targetMB * 1024 * 1024 * 8 * 0.95;
-      const audioBitrate = audioSelect.value === 'mute' ? 0 : (parseInt(audioSelect.value, 10) || 128);
-      const audioBits = audioBitrate * 1000 * effectiveSec;
-      const videoBits = Math.max(0, totalBits - audioBits);
-      const videoBitrate = Math.max(64, Math.floor(videoBits / effectiveSec / 1000));
-
-      const inputExt = selectedFile.name.split('.').pop().toLowerCase() || 'mp4';
-      const inName = `input.${inputExt}`;
-      const outExt = selectedFormat === 'gif' || selectedFormat === 'mp3' ? selectedFormat : 'mp4';
-      const outName = `output.${outExt}`;
-
-      setProgress(25, 'Loading video into WebAssembly virtual memory...');
-      const fileData = await selectedFile.arrayBuffer();
-      ffmpeg.FS('writeFile', inName, new Uint8Array(fileData));
-
-      ffmpeg.setProgress(({ ratio }) => {
-        const pct = Math.min(95, Math.max(30, 30 + Math.round((ratio || 0) * 65)));
-        setProgress(pct, 'Encoding in browser (WebAssembly)...');
-      });
-
-      const args = ['-i', inName];
-      const trimStart = getTrimStartSeconds();
-      const trimEnd = getTrimEndSeconds();
-      if (trimStart > 0.1) args.push('-ss', String(trimStart.toFixed(2)));
-      if (trimEnd < videoDuration - 0.1) args.push('-to', String(trimEnd.toFixed(2)));
-
-      if (outExt === 'mp3') {
-        args.push('-vn', '-c:a', 'libmp3lame', '-b:a', `${audioBitrate || 192}k`);
-      } else if (outExt === 'gif') {
-        args.push('-vf', 'fps=12,scale=min(360\\,iw):-2:flags=lanczos');
-      } else {
-        args.push(
-          '-c:v', 'libx264',
-          '-b:v', `${videoBitrate}k`,
-          '-maxrate', `${Math.floor(videoBitrate * 1.15)}k`,
-          '-bufsize', `${Math.floor(videoBitrate * 2.0)}k`,
-          '-pix_fmt', 'yuv420p',
-          '-preset', 'ultrafast',
-          '-movflags', '+faststart'
-        );
-        if (audioBitrate === 0) {
-          args.push('-an');
-        } else {
-          args.push('-c:a', 'aac', '-b:a', `${audioBitrate}k`);
-        }
-      }
-      args.push('-y', outName);
-
-      setProgress(35, 'Encoding with FFmpeg.wasm in your browser...');
-      await ffmpeg.run(...args);
-
-      setProgress(98, 'Extracting completed file...');
-      const outData = ffmpeg.FS('readFile', outName);
-      const outBlob = new Blob([outData.buffer], { type: outExt === 'gif' ? 'image/gif' : (outExt === 'mp3' ? 'audio/mpeg' : 'video/mp4') });
-      const localUrl = URL.createObjectURL(outBlob);
-
-      // Clean up virtual FS to free browser memory
-      try { ffmpeg.FS('unlink', inName); } catch (_) {}
-      try { ffmpeg.FS('unlink', outName); } catch (_) {}
-
-      onCompressionDone({
-        originalSize: selectedFile.size,
-        compressedSize: outBlob.size,
-        duration: effectiveSec,
-        format: outExt,
-        downloadUrl: localUrl,
-        outputUrl: localUrl,
-      });
-
-      showToast('Client-side WebAssembly compression complete! (Zero server uploads)', 'success');
-
-    } catch (err) {
-      console.error('Wasm compression error:', err);
-      showToast(err.message || 'Client-side compression failed.', 'error');
-      progressCard.classList.remove('visible');
-      compressBtn.disabled = false;
-    }
   }
 
   if (compressBtn) {
@@ -813,26 +928,26 @@
     if (videoPreview && !videoPreview.paused) {
       videoPreview.pause();
       isPlayingPreview = false;
+      stopPreviewLoop();
       updatePlayPauseIcon();
-    }
-
-    if (engineSelect && engineSelect.value === 'wasm') {
-      await startWasmCompression();
-      return;
     }
 
     compressBtn.disabled = true;
     resultCard.classList.remove('visible');
     progressCard.classList.add('visible');
+    resetSaveClipButton();
     setProgress(0, 'Uploading video…');
 
     try {
-      const uploadData = await uploadFile(selectedFile);
+      const uploadData = await uploadFile(selectedFile, (pct) => {
+        setProgress(pct, 'Uploading video…');
+      });
       uploadedFileId = uploadData.id;
 
       setProgress(0, 'Compressing with FFmpeg…');
       const trimStart = getTrimStartSeconds();
       const trimEnd = getTrimEndSeconds();
+      const shouldTrim = videoDuration > 0 && (trimStart > 0.1 || (videoDuration - trimEnd) > 0.1);
       const vol = isMuted ? 0 : outputVolume;
 
       const opts = {
@@ -850,33 +965,46 @@
         opts.audioBitrate = parseInt(audioSelect.value, 10) || 128;
       }
 
-      // Connect progress listener before triggering async compression to prevent race conditions
       subscribeProgress(uploadedFileId);
-      await requestCompression(uploadedFileId, parseInt(slider.value, 10), trimStart, trimEnd, vol, opts);
+      await requestCompression(
+        uploadedFileId,
+        parseInt(slider.value, 10),
+        shouldTrim ? trimStart : null,
+        shouldTrim ? trimEnd : null,
+        vol,
+        opts
+      );
 
     } catch (err) {
+      closeActiveEventSource();
       showToast(err.message || 'Compression failed. Please try again.', 'error');
       progressCard.classList.remove('visible');
       compressBtn.disabled = false;
     }
   }
 
-  function uploadFile(file) {
+  function uploadFile(file, onUploadProgress) {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
+      activeUploadXhr = xhr;
       const fd = new FormData();
       fd.append('video', file);
 
       xhr.open('POST', '/api/upload', true);
+      xhr.setRequestHeader('X-Requested-With', '10mb-client');
 
       xhr.upload.addEventListener('progress', (e) => {
-        if (e.lengthComputable) {
-          const pct = (e.loaded / e.total) * 100;
-          setProgress(pct, 'Uploading video…');
+        if (e.lengthComputable && typeof onUploadProgress === 'function') {
+          onUploadProgress((e.loaded / e.total) * 100);
         }
       });
 
+      const finish = () => {
+        if (activeUploadXhr === xhr) activeUploadXhr = null;
+      };
+
       xhr.addEventListener('load', () => {
+        finish();
         if (xhr.status >= 200 && xhr.status < 300) {
           try {
             const data = JSON.parse(xhr.responseText);
@@ -895,7 +1023,15 @@
         }
       });
 
-      xhr.addEventListener('error', () => reject(new Error('Network error during file upload.')));
+      xhr.addEventListener('error', () => {
+        finish();
+        reject(new Error('Network error during file upload.'));
+      });
+      xhr.addEventListener('abort', () => {
+        finish();
+        reject(new Error('Upload cancelled.'));
+      });
+
       xhr.send(fd);
     });
   }
@@ -903,7 +1039,7 @@
   async function requestCompression(id, targetMB, trimStart, trimEnd, vol, extraOpts = {}) {
     const body = { id, targetMB, ...extraOpts };
 
-    if (trimStart > 0.1 || (videoDuration - trimEnd) > 0.1) {
+    if (typeof trimStart === 'number' && typeof trimEnd === 'number' && trimEnd > trimStart) {
       body.trimStart = trimStart;
       body.trimEnd = trimEnd;
     }
@@ -915,7 +1051,7 @@
 
     const res = await fetch('/api/compress', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: apiHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
     });
 
@@ -932,12 +1068,9 @@
   }
 
   function subscribeProgress(id) {
-    if (eventSource) {
-      eventSource.close();
-      eventSource = null;
-    }
+    closeActiveEventSource();
 
-    eventSource = new EventSource(`/api/progress/${id}`);
+    eventSource = new EventSource(`/api/progress/${encodeURIComponent(id)}`);
 
     eventSource.addEventListener('progress', (e) => {
       try {
@@ -947,7 +1080,7 @@
         const stageMap = {
           trimming: 'Trimming clip…',
           analyzing: 'Analyzing streams…',
-          compressing: 'Encoding pass…',
+          compressing: 'Encoding video…',
           done: 'Finalizing…',
         };
         setProgress(percent, stageMap[stage] || 'Compressing…');
@@ -963,19 +1096,12 @@
         progressCard.classList.remove('visible');
         compressBtn.disabled = false;
       }
-      if (eventSource) {
-        eventSource.close();
-        eventSource = null;
-      }
+      closeActiveEventSource();
     });
 
     eventSource.addEventListener('error', (e) => {
-      // If result card is already visible or connection closed normally, ignore
       if (resultCard && resultCard.classList.contains('visible')) {
-        if (eventSource) {
-          eventSource.close();
-          eventSource = null;
-        }
+        closeActiveEventSource();
         return;
       }
 
@@ -989,10 +1115,7 @@
       } else {
         showToast('Connection interrupted during compression.', 'error');
       }
-      if (eventSource) {
-        eventSource.close();
-        eventSource = null;
-      }
+      closeActiveEventSource();
       progressCard.classList.remove('visible');
       compressBtn.disabled = false;
     });
@@ -1001,8 +1124,8 @@
   function onCompressionDone(data) {
     const origBytes = data.originalSize || (selectedFile ? selectedFile.size : 0);
     const compBytes = data.compressedSize || 0;
-    const downloadUrl = data.downloadUrl || '#';
-    const outputUrl = data.outputUrl || '';
+    const downloadUrl = isSafeMediaUrl(data.downloadUrl) ? data.downloadUrl : '#';
+    const outputUrl = isSafeMediaUrl(data.outputUrl) ? data.outputUrl : '';
     const format = data.format || 'mp4';
 
     originalSize.textContent = formatBytes(origBytes);
@@ -1010,34 +1133,37 @@
 
     if (origBytes > 0 && compBytes > 0) {
       const saved = ((1 - compBytes / origBytes) * 100).toFixed(1);
-      compressionRatio.textContent = `${saved}% smaller`;
+      compressionRatio.textContent = Number(saved) >= 0
+        ? `${saved}% smaller`
+        : `${Math.abs(Number(saved)).toFixed(1)}% larger`;
     } else {
       compressionRatio.textContent = 'Optimized';
     }
 
     downloadBtn.href = downloadUrl;
+    resetSaveClipButton();
 
-    // Side-by-side comparison popout setup
     if (format === 'mp4' && outputUrl) {
       openCompareBtn.style.display = 'inline-flex';
       compareOutput.src = outputUrl;
-      compareOriginal.src = videoObjectUrl;
+      compareOriginal.src = videoObjectUrl || '';
       const startSec = getTrimStartSeconds();
       compareOriginal.currentTime = startSec;
       compareOutput.currentTime = 0;
     } else {
       openCompareBtn.style.display = 'none';
+      releaseVideoElement(compareOutput);
     }
 
     progressCard.classList.remove('visible');
     resultCard.classList.add('visible');
     compressBtn.disabled = false;
     setProgress(100, 'Complete!');
-    showToast('Video compression complete!', 'success');
+    showToast('Video compression complete! Source file purged.', 'success');
   }
 
   // ==========================================
-  //  SAVE TO STORED CLIPS
+  //  SAVE TO PRIVATE STORED CLIPS
   // ==========================================
 
   if (saveClipBtn) {
@@ -1048,8 +1174,7 @@
       }
 
       saveClipBtn.disabled = true;
-      const originalHTML = saveClipBtn.innerHTML;
-      saveClipBtn.innerHTML = '<span>Saving to Library…</span>';
+      saveClipBtn.textContent = 'Saving to Private Library…';
 
       try {
         const payload = {
@@ -1062,24 +1187,22 @@
 
         const res = await fetch('/api/clips/save', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: apiHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify(payload),
         });
 
         const data = await res.json();
         if (res.ok && data.success) {
-          saveClipBtn.innerHTML = '<span>✓ Saved to Stored Clips</span>';
-          showToast('Saved to your Stored Clips library!', 'success');
+          saveClipBtn.textContent = '✓ Saved to Stored Clips';
+          showToast('Saved to your private Stored Clips library!', 'success');
           loadClips();
         } else {
           showToast(data.error || 'Failed to save clip.', 'error');
-          saveClipBtn.innerHTML = originalHTML;
-          saveClipBtn.disabled = false;
+          resetSaveClipButton();
         }
       } catch (err) {
         showToast(err.message || 'Error saving clip.', 'error');
-        saveClipBtn.innerHTML = originalHTML;
-        saveClipBtn.disabled = false;
+        resetSaveClipButton();
       }
     });
   }
@@ -1100,7 +1223,7 @@
     document.body.style.overflow = '';
     if (compareOriginal) compareOriginal.pause();
     if (compareOutput) compareOutput.pause();
-    comparePlayText.textContent = 'Play Both';
+    if (comparePlayText) comparePlayText.textContent = 'Play Both';
   }
 
   if (openCompareBtn) openCompareBtn.addEventListener('click', openComparisonModal);
@@ -1111,8 +1234,12 @@
     });
   }
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && compareModal && compareModal.classList.contains('visible')) {
-      closeComparisonModal();
+    if (e.key === 'Escape') {
+      if (confirmModal && confirmModal.classList.contains('visible')) {
+        closeConfirmModal(false);
+      } else if (compareModal && compareModal.classList.contains('visible')) {
+        closeComparisonModal();
+      }
     }
   });
 
@@ -1138,7 +1265,7 @@
     compareOriginal.addEventListener('timeupdate', () => {
       const startSec = getTrimStartSeconds();
       const endSec = getTrimEndSeconds();
-      if (compareOriginal.currentTime >= endSec - 0.05) {
+      if (endSec > 0 && compareOriginal.currentTime >= endSec - 0.05) {
         compareOriginal.currentTime = startSec;
         compareOutput.currentTime = 0;
       }
@@ -1155,38 +1282,47 @@
   }
 
   // ==========================================
-  //  STORED CLIPS LIBRARY
+  //  PRIVATE STORED CLIPS LIBRARY
   // ==========================================
+
+  function clearClipsListDom() {
+    if (!clipsList) return;
+    // Release any active <video> decoders before detaching nodes to prevent memory leaks
+    clipsList.querySelectorAll('video').forEach(releaseVideoElement);
+    clipsList.replaceChildren();
+  }
 
   async function loadClips() {
     try {
-      const res = await fetch('/api/clips');
+      const res = await fetch('/api/clips', { cache: 'no-store' });
       if (!res.ok) throw new Error('Failed to load stored clips');
-      clips = await res.json();
+      const data = await res.json();
+      clips = Array.isArray(data) ? data : [];
       updateClipsBadges(clips.length);
       renderClipsList(searchInput ? searchInput.value : '');
 
       if (clips.length > 0) {
-        selectClip(clips[0]);
+        const stillExists = activeClip && clips.find(c => c.id === activeClip.id);
+        selectClip(stillExists || clips[0]);
       } else {
+        activeClip = null;
         renderEmptyClipsState();
       }
     } catch (err) {
-      console.error('Failed to load clips:', err);
       updateClipsBadges(0);
       renderEmptyClipsState();
     }
   }
 
   function updateClipsBadges(count) {
-    if (navClipBadge) navClipBadge.textContent = count;
+    if (navClipBadge) navClipBadge.textContent = String(count);
     if (homeClipCount) homeClipCount.textContent = `${count} clip${count === 1 ? '' : 's'} saved`;
     if (sidebarCount) sidebarCount.textContent = `${count} clip${count === 1 ? '' : 's'}`;
   }
 
   function renderClipsList(filterText = '') {
     if (!clipsList) return;
-    clipsList.innerHTML = '';
+    clearClipsListDom();
 
     const q = filterText.trim().toLowerCase();
     const filtered = clips.filter(c =>
@@ -1202,53 +1338,101 @@
       if (clips.length === 0) {
         renderEmptyClipsState();
       } else {
-        clipsList.innerHTML = `<div style="padding: 24px; text-align: center; color: var(--mute)">No clips matching "${escapeHTML(filterText)}"</div>`;
+        const emptyMsg = document.createElement('div');
+        emptyMsg.style.cssText = 'padding: 24px; text-align: center; color: var(--mute)';
+        emptyMsg.textContent = `No clips matching "${filterText}"`;
+        clipsList.appendChild(emptyMsg);
       }
       return;
     }
 
+    const frag = document.createDocumentFragment();
+
     filtered.forEach(clip => {
-      const row = document.createElement('div');
+      const row = document.createElement('button');
+      row.type = 'button';
       row.className = `row ${activeClip && activeClip.id === clip.id ? 'active' : ''}`;
       row.dataset.id = clip.id;
 
-      const dateStr = clip.createdAt ? new Date(clip.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'Recently';
-      const safeTitle = escapeHTML(clip.title || clip.originalName || 'Untitled Clip');
-      const safeFormat = escapeHTML(clip.format || 'MP4').toUpperCase();
-      const safeStreamUrl = encodeURI(clip.streamUrl || `/api/clips/stream/${encodeURIComponent(clip.filename)}`);
+      const thumb = document.createElement('div');
+      thumb.className = 'thumb';
 
-      row.innerHTML = `
-        <div class="thumb">
-          <video src="${safeStreamUrl}#t=0.5" preload="metadata" muted></video>
-          <span>${formatTime(clip.duration)}</span>
-        </div>
-        <div style="flex:1;overflow:hidden">
-          <b>${safeTitle}</b>
-          <span class="small">${safeFormat} &nbsp;•&nbsp; ${formatBytes(clip.size)} &nbsp;•&nbsp; ${dateStr}</span>
-        </div>
-      `;
+      const fmt = String(clip.format || 'mp4').toLowerCase();
+      const rawStream = clip.streamUrl || `/api/clips/stream/${encodeURIComponent(clip.filename || '')}`;
+      const streamUrl = isSafeMediaUrl(rawStream) ? rawStream : '';
 
+      if (fmt === 'gif' && streamUrl) {
+        const img = document.createElement('img');
+        img.src = streamUrl;
+        img.alt = clip.title || 'GIF clip thumbnail';
+        img.loading = 'lazy';
+        thumb.appendChild(img);
+      } else if (fmt === 'mp3') {
+        const badge = document.createElement('div');
+        badge.className = 'thumb-audio-label';
+        badge.textContent = 'MP3';
+        thumb.appendChild(badge);
+      } else if (streamUrl) {
+        const vid = document.createElement('video');
+        vid.src = `${streamUrl}#t=0.5`;
+        vid.preload = 'metadata';
+        vid.muted = true;
+        vid.playsInline = true;
+        thumb.appendChild(vid);
+      }
+
+      const durBadge = document.createElement('span');
+      durBadge.textContent = formatTime(clip.duration);
+      thumb.appendChild(durBadge);
+
+      const info = document.createElement('div');
+      info.style.cssText = 'flex:1;overflow:hidden;text-align:left';
+
+      const titleEl = document.createElement('b');
+      titleEl.textContent = clip.title || clip.originalName || 'Untitled Clip';
+
+      const dateStr = clip.createdAt
+        ? new Date(clip.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+        : 'Recently';
+      const metaEl = document.createElement('span');
+      metaEl.className = 'small';
+      metaEl.textContent = `${fmt.toUpperCase()}  •  ${formatBytes(clip.size)}  •  ${dateStr}`;
+
+      info.appendChild(titleEl);
+      info.appendChild(metaEl);
+
+      row.appendChild(thumb);
+      row.appendChild(info);
       row.addEventListener('click', () => selectClip(clip));
-      clipsList.appendChild(row);
+      frag.appendChild(row);
     });
+
+    clipsList.appendChild(frag);
   }
 
   function selectClip(clip) {
     if (!clip) return;
     activeClip = clip;
 
-    // Highlight row in list
     document.querySelectorAll('.clips-list .row').forEach(r => {
       r.classList.toggle('active', r.dataset.id === clip.id);
     });
 
-    // Populate metadata & download button safely
+    const fmt = String(clip.format || 'mp4').toLowerCase();
+    const dateStr = clip.createdAt
+      ? new Date(clip.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+      : 'Recently';
+
     activeClipTitle.textContent = clip.title || clip.originalName || 'Untitled Clip';
-    const dateStr = clip.createdAt ? new Date(clip.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : 'Recently';
-    activeClipMeta.textContent = `${(clip.format || 'MP4').toUpperCase()}  •  ${formatBytes(clip.size)}  •  ${dateStr}`;
-    activeClipDownloadBtn.href = clip.downloadUrl || `/api/clips/download/${encodeURIComponent(clip.filename)}`;
+    activeClipMeta.textContent = `${fmt.toUpperCase()}  •  ${formatBytes(clip.size)}  •  ${dateStr}`;
+
+    const rawDownload = clip.downloadUrl || `/api/clips/download/${encodeURIComponent(clip.filename || '')}`;
+    const safeDownload = isSafeMediaUrl(rawDownload) ? rawDownload : '#';
+    const rawStream = clip.streamUrl || `/api/clips/stream/${encodeURIComponent(clip.filename || '')}`;
+    const safeStream = isSafeMediaUrl(rawStream) ? rawStream : '';
 
     if (activeClipDownloadBtn) {
+      activeClipDownloadBtn.href = safeDownload;
       activeClipDownloadBtn.style.pointerEvents = '';
       activeClipDownloadBtn.style.opacity = '1';
     }
@@ -1257,27 +1441,64 @@
       activeClipDeleteBtn.style.opacity = '1';
     }
 
-    // Load stream into player
-    ytVideo.src = clip.streamUrl || `/api/clips/stream/${encodeURIComponent(clip.filename)}`;
-    ytVideo.load();
+    // Render the correct media player for MP4, GIF, or MP3
+    releaseVideoElement(ytVideo);
+    if (ytAudio) {
+      ytAudio.pause();
+      ytAudio.removeAttribute('src');
+      ytAudio.load();
+    }
+    if (ytGifPreview) {
+      ytGifPreview.hidden = true;
+      ytGifPreview.removeAttribute('src');
+    }
+    if (ytAudioPlaceholder) ytAudioPlaceholder.hidden = true;
+
+    if (fmt === 'gif' && ytGifPreview && safeStream) {
+      ytVideo.hidden = true;
+      ytGifPreview.src = safeStream;
+      ytGifPreview.hidden = false;
+    } else if (fmt === 'mp3' && ytAudio && ytAudioPlaceholder && safeStream) {
+      ytVideo.hidden = true;
+      ytAudio.src = safeStream;
+      ytAudio.load();
+      ytAudioPlaceholder.hidden = false;
+    } else if (ytVideo && safeStream) {
+      ytVideo.hidden = false;
+      ytVideo.src = safeStream;
+      ytVideo.load();
+    }
   }
 
   function renderEmptyClipsState() {
+    clearClipsListDom();
     if (clipsList) {
-      clipsList.innerHTML = `
-        <div style="padding: 32px 16px; text-align: center; color: var(--mute)">
-          <p style="margin-bottom: 12px">No stored clips yet.</p>
-          <span class="small">Upload or compress a video to save clips here.</span>
-        </div>
-      `;
+      const box = document.createElement('div');
+      box.style.cssText = 'padding: 32px 16px; text-align: center; color: var(--mute)';
+      const p = document.createElement('p');
+      p.style.marginBottom = '12px';
+      p.textContent = 'No stored clips yet.';
+      const span = document.createElement('span');
+      span.className = 'small';
+      span.textContent = 'Your saved clips are private to this browser session.';
+      box.appendChild(p);
+      box.appendChild(span);
+      clipsList.appendChild(box);
     }
     if (activeClipTitle) activeClipTitle.textContent = 'No clips stored';
     if (activeClipMeta) activeClipMeta.textContent = '—';
-    if (ytVideo) {
-      ytVideo.pause();
-      ytVideo.removeAttribute('src');
-      ytVideo.load();
+    releaseVideoElement(ytVideo);
+    if (ytVideo) ytVideo.hidden = false;
+    if (ytGifPreview) {
+      ytGifPreview.hidden = true;
+      ytGifPreview.removeAttribute('src');
     }
+    if (ytAudio) {
+      ytAudio.pause();
+      ytAudio.removeAttribute('src');
+      ytAudio.load();
+    }
+    if (ytAudioPlaceholder) ytAudioPlaceholder.hidden = true;
     if (activeClipDownloadBtn) {
       activeClipDownloadBtn.style.pointerEvents = 'none';
       activeClipDownloadBtn.style.opacity = '0.5';
@@ -1289,16 +1510,26 @@
     }
   }
 
-  // Delete clip action
+  // Delete clip action (using accessible in-app confirmation modal)
   if (activeClipDeleteBtn) {
     activeClipDeleteBtn.addEventListener('click', async () => {
       if (!activeClip) return;
-      if (!confirm(`Are you sure you want to delete "${activeClip.title}"?`)) return;
+      const targetClip = activeClip;
+      const confirmed = await openConfirmModal({
+        title: 'Delete clip',
+        message: `Permanently delete "${targetClip.title}" from your private library?`,
+        confirmLabel: 'Delete clip',
+        danger: true,
+      });
+      if (!confirmed) return;
 
       try {
-        const res = await fetch(`/api/clips/${activeClip.id}`, { method: 'DELETE' });
+        const res = await fetch(`/api/clips/${encodeURIComponent(targetClip.id)}`, {
+          method: 'DELETE',
+          headers: apiHeaders(),
+        });
         if (res.ok) {
-          clips = clips.filter(c => c.id !== activeClip.id);
+          clips = clips.filter(c => c.id !== targetClip.id);
           updateClipsBadges(clips.length);
           renderClipsList(searchInput ? searchInput.value : '');
           if (clips.length > 0) {
@@ -1307,7 +1538,7 @@
             activeClip = null;
             renderEmptyClipsState();
           }
-          showToast('Clip deleted from library.', 'normal');
+          showToast('Clip permanently deleted.', 'normal');
         } else {
           showToast('Failed to delete clip.', 'error');
         }
@@ -1317,27 +1548,37 @@
     });
   }
 
-  // Search input filter
+  // Debounced search input filter (avoids thrashing video decoders on every keystroke)
   if (searchInput) {
     searchInput.addEventListener('input', () => {
-      renderClipsList(searchInput.value);
+      clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = setTimeout(() => {
+        renderClipsList(searchInput.value);
+      }, 150);
     });
   }
 
-  // Direct upload to stored clips
+  // Direct upload to private stored clips
   if (directUploadInput) {
     directUploadInput.addEventListener('change', async () => {
       const file = directUploadInput.files[0];
       if (!file) return;
 
+      if (!isVideoFile(file)) {
+        showToast('Please select a valid video file.', 'error');
+        directUploadInput.value = '';
+        return;
+      }
+
       const fd = new FormData();
       fd.append('video', file);
 
-      showToast('Uploading clip to library…', 'normal');
+      showToast('Uploading clip to your private library…', 'normal');
 
       try {
         const res = await fetch('/api/clips/upload', {
           method: 'POST',
+          headers: apiHeaders(),
           body: fd,
         });
 
@@ -1347,7 +1588,7 @@
           updateClipsBadges(clips.length);
           renderClipsList(searchInput ? searchInput.value : '');
           selectClip(data.clip);
-          showToast('Clip uploaded and saved to library!', 'success');
+          showToast('Clip uploaded to your private library!', 'success');
         } else {
           showToast(data.error || 'Failed to upload clip', 'error');
         }
@@ -1360,17 +1601,55 @@
   }
 
   // ==========================================
+  //  ONE-CLICK FULL PRIVACY DATA PURGE
+  // ==========================================
+
+  if (purgePrivacyBtn) {
+    purgePrivacyBtn.addEventListener('click', async () => {
+      const confirmed = await openConfirmModal({
+        title: 'Clear all my data',
+        message: 'This will permanently delete all of your stored clips, clear any temporary files on the server, clear the batch queue, and rotate your private session.',
+        confirmLabel: 'Delete everything',
+        danger: true,
+      });
+      if (!confirmed) return;
+
+      try {
+        const res = await fetch('/api/privacy/purge', {
+          method: 'POST',
+          headers: apiHeaders(),
+        });
+        if (!res.ok) throw new Error('Failed to purge session data.');
+
+        batchQueue = [];
+        updateBatchBadges();
+        renderBatchList();
+        resetStudioEmptyState();
+
+        clips = [];
+        activeClip = null;
+        updateClipsBadges(0);
+        renderEmptyClipsState();
+
+        showToast('All your files and clips have been permanently wiped.', 'success');
+      } catch (err) {
+        showToast(err.message || 'Error clearing session data.', 'error');
+      }
+    });
+  }
+
+  // ==========================================
   //  BATCH COMPRESSION QUEUE CONTROLLER
   // ==========================================
 
   function updateBatchBadges() {
     const count = batchQueue.length;
     if (navBatchBadge) {
-      navBatchBadge.textContent = count;
+      navBatchBadge.textContent = String(count);
       navBatchBadge.style.display = count > 0 ? 'inline-block' : 'none';
     }
     if (startBatchBtn) {
-      const pending = batchQueue.filter(i => i.status !== 'done').length;
+      const pending = batchQueue.filter(i => i.status === 'ready' || i.status === 'error').length;
       startBatchBtn.textContent = isProcessingBatch
         ? 'Processing Batch…'
         : `Start Batch (${pending} file${pending === 1 ? '' : 's'})`;
@@ -1390,7 +1669,7 @@
       if (!isVideoFile(file)) continue;
 
       batchQueue.push({
-        uid: (crypto.randomUUID ? crypto.randomUUID() : String(Math.random())).slice(0, 8),
+        uid: (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2)).slice(0, 8),
         file,
         name: file.name,
         size: file.size,
@@ -1416,123 +1695,191 @@
     go('batch');
   }
 
+  function updateBatchRowProgress(item, labelPrefix) {
+    const row = document.getElementById(`batch-item-${item.uid}`);
+    if (!row) return;
+    const fill = row.querySelector('.batch-item-progress-fill');
+    if (fill) fill.style.width = `${Math.min(100, Math.max(0, item.percent))}%`;
+    const badge = row.querySelector('.batch-status-badge');
+    if (badge) badge.textContent = `${labelPrefix} ${Math.round(item.percent)}%`;
+  }
+
   function renderBatchList() {
     if (!batchList) return;
-    batchList.innerHTML = '';
+    batchList.replaceChildren();
 
     if (batchQueue.length === 0) {
-      batchList.innerHTML = `
-        <div style="padding: 48px 16px; text-align: center; color: var(--mute); border: 1px dashed var(--line); border-radius: 12px">
-          <p style="font-size: 17px; margin-bottom: 8px">Batch queue is empty</p>
-          <span class="small">Click "+ Add Files" or drop multiple videos on the upload page to start batch encoding.</span>
-        </div>
-      `;
+      const emptyBox = document.createElement('div');
+      emptyBox.style.cssText = 'padding: 48px 16px; text-align: center; color: var(--mute); border: 1px dashed var(--line); border-radius: 12px';
+      const p = document.createElement('p');
+      p.style.cssText = 'font-size: 17px; margin-bottom: 8px';
+      p.textContent = 'Batch queue is empty';
+      const span = document.createElement('span');
+      span.className = 'small';
+      span.textContent = 'Click "+ Add Files" or drop multiple videos on the upload page to start batch encoding.';
+      emptyBox.appendChild(p);
+      emptyBox.appendChild(span);
+      batchList.appendChild(emptyBox);
       return;
     }
+
+    const frag = document.createDocumentFragment();
 
     batchQueue.forEach((item, index) => {
       const row = document.createElement('div');
       row.className = `batch-item ${item.status === 'compressing' || item.status === 'uploading' ? 'active' : ''} ${item.status === 'done' ? 'done' : ''}`;
       row.id = `batch-item-${item.uid}`;
 
-      const safeName = escapeHTML(item.name);
-      const isPending = item.status === 'ready';
+      const canEdit = !isProcessingBatch && (item.status === 'ready' || item.status === 'error');
 
-      let statusHtml = '';
+      // Column 1: File info + progress bar
+      const infoCol = document.createElement('div');
+      infoCol.className = 'batch-item-info';
+
+      const nameEl = document.createElement('b');
+      nameEl.title = item.name;
+      nameEl.textContent = item.name;
+
+      const sizeEl = document.createElement('span');
+      sizeEl.className = 'small';
+      sizeEl.style.marginTop = '2px';
+      sizeEl.textContent = formatBytes(item.size);
+
+      const progWrap = document.createElement('div');
+      progWrap.className = 'batch-item-progress';
+      const progFill = document.createElement('div');
+      progFill.className = 'batch-item-progress-fill';
+      progFill.style.width = `${Math.min(100, Math.max(0, item.percent))}%`;
+      progWrap.appendChild(progFill);
+
+      infoCol.appendChild(nameEl);
+      infoCol.appendChild(sizeEl);
+      infoCol.appendChild(progWrap);
+
+      // Column 2: Target Size select
+      const targetCol = document.createElement('div');
+      const targetLabel = document.createElement('label');
+      targetLabel.className = 'small';
+      targetLabel.style.cssText = 'display:block;margin-bottom:4px';
+      targetLabel.textContent = 'Target Size';
+
+      const targetSel = document.createElement('select');
+      targetSel.className = 'batch-target-select';
+      targetSel.disabled = !canEdit;
+      targetSel.setAttribute('aria-label', `Target size for ${item.name}`);
+      targetSel.style.cssText = 'padding:6px 10px;font-size:13px;width:100%';
+      [10, 16, 20, 50, 100].forEach(mb => {
+        const opt = document.createElement('option');
+        opt.value = String(mb);
+        opt.textContent = `${mb} MB`;
+        opt.selected = item.targetMB === mb;
+        targetSel.appendChild(opt);
+      });
+      targetSel.addEventListener('change', () => {
+        item.targetMB = parseInt(targetSel.value, 10) || 10;
+      });
+      targetCol.appendChild(targetLabel);
+      targetCol.appendChild(targetSel);
+
+      // Column 3: Format select
+      const fmtCol = document.createElement('div');
+      const fmtLabel = document.createElement('label');
+      fmtLabel.className = 'small';
+      fmtLabel.style.cssText = 'display:block;margin-bottom:4px';
+      fmtLabel.textContent = 'Format';
+
+      const fmtSel = document.createElement('select');
+      fmtSel.className = 'batch-format-select';
+      fmtSel.disabled = !canEdit;
+      fmtSel.setAttribute('aria-label', `Format for ${item.name}`);
+      fmtSel.style.cssText = 'padding:6px 10px;font-size:13px;width:100%';
+      [
+        { v: 'mp4', l: 'MP4' },
+        { v: 'gif', l: 'GIF' },
+        { v: 'mp3', l: 'MP3' },
+      ].forEach(entry => {
+        const opt = document.createElement('option');
+        opt.value = entry.v;
+        opt.textContent = entry.l;
+        opt.selected = item.format === entry.v;
+        fmtSel.appendChild(opt);
+      });
+      fmtSel.addEventListener('change', () => {
+        item.format = fmtSel.value;
+      });
+      fmtCol.appendChild(fmtLabel);
+      fmtCol.appendChild(fmtSel);
+
+      // Column 4: Status badge
+      const statusCol = document.createElement('div');
+      statusCol.style.textAlign = 'center';
+      const badge = document.createElement('span');
+      badge.className = 'batch-status-badge';
       if (item.status === 'ready') {
-        statusHtml = '<span class="batch-status-badge">Ready</span>';
+        badge.textContent = 'Ready';
       } else if (item.status === 'uploading') {
-        statusHtml = `<span class="batch-status-badge working">Uploading ${Math.round(item.percent)}%</span>`;
+        badge.classList.add('working');
+        badge.textContent = `Uploading ${Math.round(item.percent)}%`;
       } else if (item.status === 'compressing') {
-        statusHtml = `<span class="batch-status-badge working">Encoding ${Math.round(item.percent)}%</span>`;
+        badge.classList.add('working');
+        badge.textContent = `Encoding ${Math.round(item.percent)}%`;
       } else if (item.status === 'done') {
+        badge.classList.add('done');
         const saved = item.size > 0 && item.compressedSize > 0
           ? ` (${((1 - item.compressedSize / item.size) * 100).toFixed(0)}% saved)`
           : '';
-        statusHtml = `<span class="batch-status-badge done">✓ ${formatBytes(item.compressedSize)}${saved}</span>`;
+        badge.textContent = `✓ ${formatBytes(item.compressedSize)}${saved}`;
       } else if (item.status === 'error') {
-        statusHtml = `<span class="batch-status-badge failed" title="${escapeHTML(item.error || 'Failed')}">Failed</span>`;
+        badge.classList.add('failed');
+        badge.title = item.error || 'Failed';
+        badge.textContent = 'Failed';
       }
+      statusCol.appendChild(badge);
 
-      row.innerHTML = `
-        <div class="batch-item-info">
-          <b title="${safeName}">${safeName}</b>
-          <span class="small" style="margin-top:2px">${formatBytes(item.size)}</span>
-          <div class="batch-item-progress">
-            <div class="batch-item-progress-fill" style="width: ${item.percent}%"></div>
-          </div>
-        </div>
-
-        <div>
-          <label class="small" style="display:block;margin-bottom:4px">Target Size</label>
-          <select class="batch-target-select" ${isProcessingBatch || !isPending ? 'disabled' : ''} style="padding:6px 10px;font-size:13px;width:100%">
-            <option value="10" ${item.targetMB === 10 ? 'selected' : ''}>10 MB</option>
-            <option value="16" ${item.targetMB === 16 ? 'selected' : ''}>16 MB</option>
-            <option value="20" ${item.targetMB === 20 ? 'selected' : ''}>20 MB</option>
-            <option value="50" ${item.targetMB === 50 ? 'selected' : ''}>50 MB</option>
-            <option value="100" ${item.targetMB === 100 ? 'selected' : ''}>100 MB</option>
-          </select>
-        </div>
-
-        <div>
-          <label class="small" style="display:block;margin-bottom:4px">Format</label>
-          <select class="batch-format-select" ${isProcessingBatch || !isPending ? 'disabled' : ''} style="padding:6px 10px;font-size:13px;width:100%">
-            <option value="mp4" ${item.format === 'mp4' ? 'selected' : ''}>MP4</option>
-            <option value="gif" ${item.format === 'gif' ? 'selected' : ''}>GIF</option>
-            <option value="mp3" ${item.format === 'mp3' ? 'selected' : ''}>MP3</option>
-          </select>
-        </div>
-
-        <div style="text-align:center">
-          ${statusHtml}
-        </div>
-
-        <div style="text-align:right">
-          ${item.status === 'done' && item.downloadUrl ? `
-            <a class="btn" href="${item.downloadUrl}" download style="padding:6px 14px;font-size:13px;text-decoration:none">Download</a>
-          ` : `
-            <button class="btn ghost danger batch-remove-btn" ${isProcessingBatch ? 'disabled' : ''} style="padding:6px 12px;font-size:13px" type="button">Remove</button>
-          `}
-        </div>
-      `;
-
-      // Change target size
-      const targetSel = row.querySelector('.batch-target-select');
-      if (targetSel) {
-        targetSel.addEventListener('change', () => {
-          item.targetMB = parseInt(targetSel.value, 10) || 10;
-        });
-      }
-
-      // Change format
-      const formatSel = row.querySelector('.batch-format-select');
-      if (formatSel) {
-        formatSel.addEventListener('change', () => {
-          item.format = formatSel.value;
-        });
-      }
-
-      // Remove item
-      const removeBtn = row.querySelector('.batch-remove-btn');
-      if (removeBtn) {
+      // Column 5: Action button / Download link
+      const actionCol = document.createElement('div');
+      actionCol.style.textAlign = 'right';
+      if (item.status === 'done' && isSafeMediaUrl(item.downloadUrl)) {
+        const dl = document.createElement('a');
+        dl.className = 'btn';
+        dl.href = item.downloadUrl;
+        dl.setAttribute('download', '');
+        dl.style.cssText = 'padding:6px 14px;font-size:13px;text-decoration:none';
+        dl.textContent = 'Download';
+        actionCol.appendChild(dl);
+      } else {
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'btn ghost danger batch-remove-btn';
+        removeBtn.disabled = isProcessingBatch;
+        removeBtn.style.cssText = 'padding:6px 12px;font-size:13px';
+        removeBtn.textContent = 'Remove';
+        removeBtn.setAttribute('aria-label', `Remove ${item.name}`);
         removeBtn.addEventListener('click', () => {
           batchQueue.splice(index, 1);
           updateBatchBadges();
           renderBatchList();
         });
+        actionCol.appendChild(removeBtn);
       }
 
-      batchList.appendChild(row);
+      row.appendChild(infoCol);
+      row.appendChild(targetCol);
+      row.appendChild(fmtCol);
+      row.appendChild(statusCol);
+      row.appendChild(actionCol);
+      frag.appendChild(row);
     });
+
+    batchList.appendChild(frag);
   }
 
-  // Batch Preset Chips
   if (batchChips) {
     batchChips.forEach(chip => {
       chip.addEventListener('click', () => {
         const mb = parseInt(chip.dataset.batchV, 10) || 10;
         batchQueue.forEach(item => {
-          if (item.status === 'ready') item.targetMB = mb;
+          if (item.status === 'ready' || item.status === 'error') item.targetMB = mb;
         });
         renderBatchList();
         showToast(`Set all pending items to ${mb}MB target`, 'normal');
@@ -1540,19 +1887,23 @@
     });
   }
 
-  // Clear batch
   if (clearBatchBtn) {
-    clearBatchBtn.addEventListener('click', () => {
-      if (isProcessingBatch) return;
-      if (batchQueue.length > 0 && confirm('Clear all files from batch queue?')) {
-        batchQueue = [];
-        updateBatchBadges();
-        renderBatchList();
-      }
+    clearBatchBtn.addEventListener('click', async () => {
+      if (isProcessingBatch || batchQueue.length === 0) return;
+      const confirmed = await openConfirmModal({
+        title: 'Clear batch queue',
+        message: `Remove all ${batchQueue.length} file${batchQueue.length === 1 ? '' : 's'} from the batch queue?`,
+        confirmLabel: 'Clear queue',
+        danger: true,
+      });
+      if (!confirmed) return;
+
+      batchQueue = [];
+      updateBatchBadges();
+      renderBatchList();
     });
   }
 
-  // Add more files from Batch page
   if (batchAddInput) {
     batchAddInput.addEventListener('change', () => {
       if (batchAddInput.files && batchAddInput.files.length > 0) {
@@ -1562,10 +1913,9 @@
     });
   }
 
-  // Execute Batch Sequentially
   async function startBatch() {
     if (isProcessingBatch) return;
-    const pending = batchQueue.filter(i => i.status === 'ready');
+    const pending = batchQueue.filter(i => i.status === 'ready' || i.status === 'error');
     if (pending.length === 0) {
       showToast('No pending files to compress.', 'normal');
       return;
@@ -1577,47 +1927,50 @@
 
     for (let i = 0; i < batchQueue.length; i++) {
       const item = batchQueue[i];
-      if (item.status === 'done') continue;
+      if (item.status === 'done' || !item.file) continue;
 
       item.status = 'uploading';
+      item.error = null;
       item.percent = 0;
       renderBatchList();
 
       try {
-        // Step 1: Upload
-        const uploadData = await uploadFile(item.file);
+        const uploadData = await uploadFile(item.file, (pct) => {
+          item.percent = pct;
+          updateBatchRowProgress(item, 'Uploading');
+        });
         const uploadedId = uploadData.id;
 
         item.status = 'compressing';
         item.percent = 10;
         renderBatchList();
 
-        // Step 2: Subscribe to SSE progress
         await new Promise((resolve, reject) => {
-          const sse = new EventSource(`/api/progress/${uploadedId}`);
+          const sse = new EventSource(`/api/progress/${encodeURIComponent(uploadedId)}`);
+          activeBatchEventSource = sse;
+
+          const closeSse = () => {
+            try { sse.close(); } catch (_) {}
+            if (activeBatchEventSource === sse) activeBatchEventSource = null;
+          };
 
           sse.addEventListener('progress', (e) => {
             try {
               const d = JSON.parse(e.data);
               item.percent = d.percent || 10;
-              const row = document.getElementById(`batch-item-${item.uid}`);
-              if (row) {
-                const fill = row.querySelector('.batch-item-progress-fill');
-                if (fill) fill.style.width = `${item.percent}%`;
-                const badge = row.querySelector('.batch-status-badge');
-                if (badge) badge.textContent = `Encoding ${Math.round(item.percent)}%`;
-              }
+              updateBatchRowProgress(item, 'Encoding');
             } catch (_) {}
           });
 
           sse.addEventListener('done', (e) => {
-            sse.close();
+            closeSse();
             try {
               const d = JSON.parse(e.data);
               item.status = 'done';
               item.percent = 100;
-              item.downloadUrl = d.downloadUrl;
-              item.compressedSize = d.compressedSize;
+              item.downloadUrl = isSafeMediaUrl(d.downloadUrl) ? d.downloadUrl : null;
+              item.compressedSize = d.compressedSize || 0;
+              item.file = null; // Release File handle to free memory
               resolve();
             } catch (err) {
               reject(err);
@@ -1625,7 +1978,7 @@
           });
 
           sse.addEventListener('error', (e) => {
-            sse.close();
+            closeSse();
             let msg = 'Encoding failed';
             try {
               if (e.data) msg = JSON.parse(e.data).message || msg;
@@ -1633,11 +1986,14 @@
             reject(new Error(msg));
           });
 
-          // Step 3: Trigger compress
-          requestCompression(uploadedId, item.targetMB, 0, 0, 100, {
+          // Pass null trim bounds so Studio's videoDuration never leaks into batch items
+          requestCompression(uploadedId, item.targetMB, null, null, 100, {
             format: item.format,
             encoder: encoderSelect ? encoderSelect.value : 'auto',
-          }).catch(reject);
+          }).catch((err) => {
+            closeSse();
+            reject(err);
+          });
         });
 
       } catch (err) {
@@ -1662,7 +2018,6 @@
   //  INITIALIZATION
   // ==========================================
 
-  // Check initial hash route
   const initHash = window.location.hash.replace('#', '');
   if (views.includes(initHash)) {
     go(initHash);
@@ -1670,7 +2025,9 @@
     go('home');
   }
 
-  // Pre-load clips count
   loadClips();
+  detectEncoders();
+  updateBatchBadges();
+  renderBatchList();
 
 })();
