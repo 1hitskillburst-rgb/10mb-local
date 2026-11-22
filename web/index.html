@@ -200,6 +200,16 @@
           </h3>
 
           <div class="opts">
+            <label>Encoder / Acceleration
+              <select id="encoderSelect">
+                <option value="auto" selected>Auto (best available)</option>
+                <option value="cpu">CPU (libx264)</option>
+                <option value="nvenc">NVIDIA NVENC (GPU)</option>
+                <option value="qsv">Intel QuickSync (GPU)</option>
+                <option value="amf">AMD AMF (GPU)</option>
+              </select>
+            </label>
+
             <label>Resolution
               <select id="resolutionSelect">
                 <option value="auto" selected>Auto (smart scale)</option>

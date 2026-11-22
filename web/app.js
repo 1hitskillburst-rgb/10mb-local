@@ -66,6 +66,7 @@
   const slider = document.getElementById('slider');
   const presetChips = document.querySelectorAll('#chips .chip');
   const resolutionSelect = document.getElementById('resolutionSelect');
+  const encoderSelect = document.getElementById('encoderSelect');
   const fpsSelect = document.getElementById('fpsSelect');
   const speedSelect = document.getElementById('speedSelect');
   const aspectSelect = document.getElementById('aspectSelect');
@@ -626,14 +627,17 @@
 
       if (selectedFormat === 'mp3') {
         resolutionSelect.disabled = true;
+        if (encoderSelect) encoderSelect.disabled = true;
         fpsSelect.disabled = true;
         aspectSelect.disabled = true;
       } else if (selectedFormat === 'gif') {
         resolutionSelect.disabled = false;
+        if (encoderSelect) encoderSelect.disabled = true;
         fpsSelect.disabled = true;
         aspectSelect.disabled = false;
       } else {
         resolutionSelect.disabled = false;
+        if (encoderSelect) encoderSelect.disabled = false;
         fpsSelect.disabled = false;
         aspectSelect.disabled = false;
       }
@@ -692,6 +696,7 @@
         aspectRatio: aspectSelect.value,
         resolution: resolutionSelect.value,
         fps: fpsSelect.value,
+        encoder: encoderSelect ? encoderSelect.value : 'auto',
       };
 
       if (audioSelect.value === 'mute') {

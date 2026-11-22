@@ -321,14 +321,24 @@ async function runTests() {
   // Test 14: CLI argument parsing and help output
   console.log('[Test 14] CLI argument parsing & invocation...');
   const { parseArgs } = require('../cli/index');
-  const parsed = parseArgs(['-i', 'test.mp4', '-t', '16', '-f', 'gif', '-s', '5', '-e', '15', '--mute']);
+  const parsed = parseArgs(['-i', 'test.mp4', '-t', '16', '-f', 'gif', '-s', '5', '-e', '15', '--mute', '--encoder', 'nvenc']);
   assert.strictEqual(parsed.input, 'test.mp4');
   assert.strictEqual(parsed.target, 16);
   assert.strictEqual(parsed.format, 'gif');
   assert.strictEqual(parsed.trimStart, 5);
   assert.strictEqual(parsed.trimEnd, 15);
   assert.strictEqual(parsed.muteAudio, true);
+  assert.strictEqual(parsed.encoder, 'nvenc');
   console.log('  ✓ CLI argument parser verified');
+
+  // Test 15: Hardware Acceleration API & Detection
+  console.log('[Test 15] Hardware encoder detection & API...');
+  const encodersRes = await makeRequest({ path: '/api/encoders' });
+  assert.strictEqual(encodersRes.statusCode, 200);
+  const detectedEncoders = encodersRes.json();
+  assert.strictEqual(detectedEncoders.cpu, true, 'CPU encoder must be available');
+  assert.strictEqual(typeof detectedEncoders.nvenc, 'boolean');
+  console.log(`  ✓ Encoders detected: CPU=true, NVENC=${detectedEncoders.nvenc}, QSV=${detectedEncoders.qsv}, AMF=${detectedEncoders.amf}`);
 
   // Clean up any remaining test uploads
   try {

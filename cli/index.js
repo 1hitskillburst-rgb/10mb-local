@@ -32,6 +32,7 @@ function printUsage() {
         --mute                 Strip/mute audio stream
     -a, --audio-bitrate <kbps> Audio bitrate: 192 | 128 | 96 | 64 (default: 128)
         --aspect-ratio <ratio> Aspect ratio: original | 16:9 | 9:16 | 1:1 (default: original)
+        --encoder <codec>      Video codec: auto | cpu | nvenc | qsv | amf (default: auto)
     -h, --help                 Show this help message
     -v, --version              Show version
 
@@ -96,6 +97,7 @@ function parseArgs(args) {
     muteAudio: false,
     audioBitrate: 128,
     aspectRatio: 'original',
+    encoder: 'auto',
     help: false,
     version: false,
   };
@@ -134,6 +136,8 @@ function parseArgs(args) {
       options.audioBitrate = parseInt(next, 10) || 128; i++;
     } else if (arg === '--aspect-ratio' && next) {
       options.aspectRatio = next.toLowerCase(); i++;
+    } else if (arg === '--encoder' && next) {
+      options.encoder = next.toLowerCase(); i++;
     } else if (!arg.startsWith('-') && !options.input) {
       options.input = arg;
     }
@@ -198,6 +202,7 @@ async function main() {
       muteAudio: options.muteAudio,
       audioBitrate: options.audioBitrate,
       aspectRatio: options.aspectRatio,
+      encoder: options.encoder,
     };
 
     const startTime = Date.now();

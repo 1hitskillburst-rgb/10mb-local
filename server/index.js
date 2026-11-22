@@ -3,7 +3,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const { compress, probeVideo } = require('../core/compress');
+const { compress, probeVideo, getHardwareEncoders } = require('../core/compress');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -209,7 +209,7 @@ app.post('/api/upload', (req, res) => {
  * Validates inputs, bounds, and prevents path traversal.
  */
 app.post('/api/compress', async (req, res) => {
-  const { id, targetMB, trimStart, trimEnd, volume, resolution, fps, audioBitrate, muteAudio, format, speed, aspectRatio } = req.body;
+  const { id, targetMB, trimStart, trimEnd, volume, resolution, fps, audioBitrate, muteAudio, format, speed, aspectRatio, encoder } = req.body;
 
   if (!id || !isValidUUID(id)) {
     return res.status(400).json({ error: 'Invalid or missing file ID' });
@@ -244,6 +244,9 @@ app.post('/api/compress', async (req, res) => {
   if (['mp4', 'gif', 'mp3'].includes(String(format))) options.format = format;
   if (typeof speed === 'number' && speed > 0) options.speed = speed;
   if (['original', '16:9', '9:16', '1:1'].includes(String(aspectRatio))) options.aspectRatio = aspectRatio;
+  if (['auto', 'cpu', 'libx264', 'nvenc', 'qsv', 'amf'].includes(String(encoder).toLowerCase())) {
+    options.encoder = encoder.toLowerCase();
+  }
 
   // Respond immediately — compression runs asynchronously
   res.json({ status: 'started', id });
@@ -319,6 +322,19 @@ app.get('/api/download/:filename', (req, res) => {
       res.status(500).json({ error: 'Download failed' });
     }
   });
+});
+
+/**
+ * GET /api/encoders
+ * Returns detected hardware acceleration video encoders on this host.
+ */
+app.get('/api/encoders', async (req, res) => {
+  try {
+    const encoders = await getHardwareEncoders();
+    res.json(encoders);
+  } catch (err) {
+    res.json({ cpu: true, nvenc: false, qsv: false, amf: false });
+  }
 });
 
 /**

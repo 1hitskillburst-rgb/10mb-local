@@ -9,6 +9,30 @@ const crypto = require('crypto');
 ffmpeg.setFfmpegPath(ffmpegPath);
 ffmpeg.setFfprobePath(ffprobePath);
 
+let cachedEncoders = null;
+/**
+ * Detect available hardware acceleration video encoders on this host.
+ * @returns {Promise<{cpu: boolean, nvenc: boolean, qsv: boolean, amf: boolean}>}
+ */
+function getHardwareEncoders() {
+  if (cachedEncoders) return Promise.resolve(cachedEncoders);
+  return new Promise((resolve) => {
+    ffmpeg.getAvailableEncoders((err, encoders) => {
+      if (err || !encoders) {
+        cachedEncoders = { cpu: true, nvenc: false, qsv: false, amf: false };
+        return resolve(cachedEncoders);
+      }
+      cachedEncoders = {
+        cpu: true,
+        nvenc: !!(encoders.h264_nvenc || encoders.nvenc_h264),
+        qsv: !!encoders.h264_qsv,
+        amf: !!encoders.h264_amf,
+      };
+      resolve(cachedEncoders);
+    });
+  });
+}
+
 /**
  * Probe a video file to get duration and other metadata with multi-stream fallbacks.
  * @param {string} inputPath - Absolute path to the video file
@@ -286,65 +310,98 @@ async function compress(inputPath, outputPath, targetMB = 10, onProgress = () =>
       targetFps = 30; // Auto-cap at 30fps for low bitrates to boost quality per frame
     }
 
-    // Build FFmpeg command options
-    const encodeOpts = [
-      '-preset', 'slow',
-      '-profile:v', 'high',
-      '-level', '4.1',
-      '-pix_fmt', 'yuv420p',       // Universal web & mobile player compatibility
-      '-maxrate', `${Math.floor(videoBitrate * 1.15)}k`,
-      '-bufsize', `${Math.floor(videoBitrate * 2.0)}k`,
-      '-movflags', '+faststart',   // Web-optimized MP4 streaming
-    ];
+    // Encoding runner supporting CPU & Hardware Acceleration (NVENC, QSV, AMF)
+    const runEncoding = (codec) => {
+      const isNvenc = codec.includes('nvenc');
+      const isQsv = codec.includes('qsv');
+      const isAmf = codec.includes('amf');
 
-    if (videoFilters.length > 0) {
-      encodeOpts.push('-vf', videoFilters.join(','));
-    }
-    if (targetFps > 0) {
-      encodeOpts.push('-r', String(targetFps));
-      console.log(`[Quality] Capping framerate to ${targetFps} fps`);
-    }
+      const encodeOpts = [
+        '-profile:v', 'high',
+        '-pix_fmt', 'yuv420p',
+        '-maxrate', `${Math.floor(videoBitrate * 1.15)}k`,
+        '-bufsize', `${Math.floor(videoBitrate * 2.0)}k`,
+        '-movflags', '+faststart',
+      ];
 
-    // Single-Pass Constrained VBV Encoding
-    await new Promise((resolve, reject) => {
-      const cmd = ffmpeg(encodePath)
-        .videoCodec('libx264')
-        .videoBitrate(videoBitrate);
-
-      if (muteAudio) {
-        cmd.addOption('-an');
+      if (isNvenc) {
+        encodeOpts.push('-preset', 'p4');
+      } else if (isQsv) {
+        encodeOpts.push('-preset', 'medium');
+      } else if (isAmf) {
+        encodeOpts.push('-quality', 'balanced');
       } else {
-        cmd.audioCodec('aac').audioBitrate(audioBitrate);
-        const audioFilters = [];
-        if (volume !== 1 && meta.hasAudio) {
-          audioFilters.push(`volume=${volume.toFixed(2)}`);
-        }
-        if (speed !== 1.0 && meta.hasAudio) {
-          audioFilters.push(`atempo=${speed.toFixed(2)}`);
-        }
-        if (audioFilters.length > 0) {
-          cmd.audioFilter(audioFilters.join(','));
-        }
+        encodeOpts.push('-preset', 'slow', '-level', '4.1');
       }
 
-      cmd
-        .addOptions(encodeOpts)
-        .output(outputPath)
-        .on('start', () => {
-          console.log(`[Encoding] Single-pass VBV encoding (target ${videoBitrate} kbps, maxrate ${Math.floor(videoBitrate * 1.15)} kbps)...`);
-          onProgress({ percent: 10, stage: 'compressing' });
-        })
-        .on('progress', (p) => {
-          const pct = Math.min(10 + Math.round((p.percent || 0) * 0.85), 95);
-          onProgress({ percent: pct, stage: 'compressing' });
-        })
-        .on('error', (err) => reject(new Error(`Compression failed: ${err.message}`)))
-        .on('end', () => {
-          onProgress({ percent: 100, stage: 'done' });
-          resolve();
-        });
-      cmd.run();
-    });
+      if (videoFilters.length > 0) {
+        encodeOpts.push('-vf', videoFilters.join(','));
+      }
+      if (targetFps > 0) {
+        encodeOpts.push('-r', String(targetFps));
+      }
+
+      return new Promise((resolve, reject) => {
+        const cmd = ffmpeg(encodePath)
+          .videoCodec(codec)
+          .videoBitrate(videoBitrate);
+
+        if (muteAudio) {
+          cmd.addOption('-an');
+        } else {
+          cmd.audioCodec('aac').audioBitrate(audioBitrate);
+          const audioFilters = [];
+          if (volume !== 1 && meta.hasAudio) {
+            audioFilters.push(`volume=${volume.toFixed(2)}`);
+          }
+          if (speed !== 1.0 && meta.hasAudio) {
+            audioFilters.push(`atempo=${speed.toFixed(2)}`);
+          }
+          if (audioFilters.length > 0) {
+            cmd.audioFilter(audioFilters.join(','));
+          }
+        }
+
+        cmd
+          .addOptions(encodeOpts)
+          .output(outputPath)
+          .on('start', () => {
+            console.log(`[Encoding] Single-pass VBV encoding via ${codec} (target ${videoBitrate} kbps, maxrate ${Math.floor(videoBitrate * 1.15)} kbps)...`);
+            onProgress({ percent: 10, stage: 'compressing' });
+          })
+          .on('progress', (p) => {
+            const pct = Math.min(10 + Math.round((p.percent || 0) * 0.85), 95);
+            onProgress({ percent: pct, stage: 'compressing' });
+          })
+          .on('error', (err) => reject(err))
+          .on('end', () => {
+            onProgress({ percent: 100, stage: 'done' });
+            resolve();
+          });
+        cmd.run();
+      });
+    };
+
+    // Determine target codec from requested options with graceful fallback
+    const reqEncoder = String(options.encoder || 'auto').toLowerCase();
+    let targetCodec = 'libx264';
+    if (reqEncoder === 'nvenc') targetCodec = 'h264_nvenc';
+    else if (reqEncoder === 'qsv') targetCodec = 'h264_qsv';
+    else if (reqEncoder === 'amf') targetCodec = 'h264_amf';
+
+    try {
+      await runEncoding(targetCodec);
+    } catch (err) {
+      if (targetCodec !== 'libx264') {
+        console.warn(`[Hardware Acceleration] ${targetCodec} unavailable (${err.message}). Gracefully falling back to CPU libx264...`);
+        if (fs.existsSync(outputPath)) {
+          try { fs.unlinkSync(outputPath); } catch (_) {}
+        }
+        await runEncoding('libx264');
+      } else {
+        throw new Error(`Compression failed: ${err.message}`);
+      }
+    }
 
     const compressedStats = fs.statSync(outputPath);
 
@@ -364,4 +421,4 @@ async function compress(inputPath, outputPath, targetMB = 10, onProgress = () =>
   }
 }
 
-module.exports = { compress, probeVideo };
+module.exports = { compress, probeVideo, getHardwareEncoders };
